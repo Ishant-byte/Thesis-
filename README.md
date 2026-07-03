@@ -1,4 +1,4 @@
-# SajiloHRMS — PKI-secured HRMS (Tkinter + MongoDB)
+# PramaanHRMS — PKI-secured HRMS (Web + Tkinter + MongoDB)
 # --Developer: ISHANT
 This is a **local-hosted** HRMS-style application built to demonstrate **PKI-based cryptography**:
 - Certificate-based authentication (challenge-response)
@@ -8,11 +8,12 @@ This is a **local-hosted** HRMS-style application built to demonstrate **PKI-bas
 - End-to-end encrypted 1:1 chat with disappearing messages (TTL)
 - Field-level encryption for sensitive data at rest (AES-256-GCM)
 - Admin security/audit logs + user self-logs
-- Tkinter cyberpunk UI with separate Admin/User portals + animations
+- **Web UI** (React) with professional corporate design — or legacy **Tkinter** desktop client
 
 ## 1) Prerequisites
 - Python 3.10+
 - MongoDB running locally (required)
+- **Node.js 18+** (for the web client)
 - (Recommended) create and activate a venv
 
 ## 2) Quick setup (Windows PowerShell)
@@ -25,10 +26,11 @@ scripts\bootstrap.ps1
 ## 3) Install dependencies (manual)
 ```bash
 pip install -r requirements.txt
+cd web && npm install
 ```
 
 ## 4) Start MongoDB (required)
-Default connection: `mongodb://localhost:27017` (DB name: `sajilohr`)
+Default connection: `mongodb://localhost:27017` (DB name: `pramaanhr`)
 
 If MongoDB is **not** running, the server will refuse to start and the client will not operate.
 
@@ -48,7 +50,7 @@ Admin seeding is disabled by default to avoid hardcoded credentials.
 
 Set the following environment variables before starting the server:
 - `SEED_ADMIN_ENABLED=true`
-- `SEED_ADMIN_USER=admin@sajilohr.local`
+- `SEED_ADMIN_USER=admin@pramaanhr.local`
 - `SEED_ADMIN_PASS=<strong-password>`
 
 On first run, this will create the admin user and generate the admin PKCS#12 keystore.
@@ -56,14 +58,41 @@ On first run, this will create the admin user and generate the admin PKCS#12 key
 During login, the OTP is shown in a **client popup** for demo convenience.
 It is also printed to the **server terminal** as a fallback.
 
-## 6) Start the client
+## 6) Start the app (recommended)
+```powershell
+npm run dev
+```
+This starts the API server if needed, then starts the React web client.
+
+To start only the web client manually:
+```bash
+cd web
+npm run dev
+```
+
+Start the web app through npm:
+
+```powershell
+npm run web
+```
+
+Then open **http://localhost:5173** in your browser.
+
+The Vite dev server proxies API calls to `http://127.0.0.1:8765`.
+
+### Web login note
+After registration, your keystore is created on the server at `pki/users/<username>/keystore.p12`.
+During login, **upload this file** along with your password to complete certificate verification.
+You can also download it from **Profile → Download Keystore** after signing in.
+
+## 7) Start the desktop client (legacy Tkinter)
 ```bash
 python -m client.main
 ```
 
 Choose **Admin Portal** or **Employee Portal** on the landing screen.
 
-## 7) Registration (public)
+## 8) Registration (public)
 From the Login screen in either portal:
 - Click **Register**
 - Fill your details (strong password policy is enforced)
@@ -71,25 +100,26 @@ From the Login screen in either portal:
 
 Note: Admin accounts are privileged. This build allows Admin self-registration for coursework/demo convenience.
 
-## 8) Document signing & verification
+## 9) Document signing & verification
 Employee portal → Documents:
 - Sign: browse file → sign → export bundle as ZIP
 - Verify: upload file + bundle ZIP → verify signature, hash, certificate chain, CRL
 
-## 9) Chat (E2E + disappearing)
+## 10) Chat (E2E + disappearing)
 Employee/Admin → Chat:
 - Select a user/admin
 - Messages are encrypted end-to-end and stored as ciphertext.
 - Disappearing messages use MongoDB TTL; you can choose expiry when sending.
 
-## 10) Configuration
+## 11) Configuration
 Environment variables (optional):
 - `MONGO_URI` (default `mongodb://localhost:27017`)
-- `MONGO_DB` (default `sajilohr`)
+- `MONGO_DB` (default `pramaanhr`)
 - `JWT_SECRET` (default generated at runtime; for consistent tokens set a value)
 - `SERVER_KEK_PASSPHRASE` (default `change-me`) used to encrypt the server KEK file.
+- `CORS_ORIGINS` (default `http://localhost:5173,http://127.0.0.1:5173`) for web client
 
-## 11) Tests
+## 12) Tests
 ```bash
 pytest -q
 ```
