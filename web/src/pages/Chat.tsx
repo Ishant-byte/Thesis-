@@ -18,7 +18,7 @@ interface ChatLine {
   text: string;
   type: "sent" | "received" | "system";
 }
-
+// main function
 export function ChatPage() {
   const { session } = useAuth();
   const [people, setPeople] = useState<Person[]>([]);
