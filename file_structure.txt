@@ -1,0 +1,24 @@
+HRMS_PKI_Project/
+│
+├── main_app.py              # The entry point (Tkinter UI)
+├── requirements.txt         # List of libraries (cryptography, etc.)
+│
+├── core/                    # The "HRMS Central Manager" logic
+│   ├── __init__.py
+│   ├── ca_authority.py      # Module for Root CA & X.509 issuance
+│   ├── verifier.py          # Logic for Signature/Integrity checking
+│   └── encryptor.py         # AES-256 Symmetric & Hybrid logic
+│
+├── client/                  # The "Employee Agent" logic
+│   ├── __init__.py
+│   ├── key_manager.py       # RSA Key generation & storage
+│   └── signer.py            # Hashing & Digital Signature logic
+│
+├── storage/                 # The "Trust Indexer" (Data Layer)
+│   ├── certs/               # Stored public .crt files
+│   ├── keys/                # User Private Keys (.pem) - simulate local storage
+│   ├── documents/           # Raw and Encrypted contracts
+│   └── revocation_list.txt  # Simple CRL (Certificate Revocation List)
+│
+└── tests/                   # Simulation scripts for Req #6
+    └── attack_simulations.py # Scripts for MitM and Spoofing tests

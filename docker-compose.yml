@@ -1,0 +1,42 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: pramaanhr-mongo
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "mongodb://localhost:27017/admin", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  server:
+    build: .
+    container_name: pramaanhr-server
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    ports:
+      - "8765:8765"
+    env_file:
+      - .env
+    environment:
+      # Must bind to all interfaces inside container
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: "8765"
+
+      # Mongo hostname is the service name inside Docker network
+      MONGO_URI: "mongodb://mongo:27017"
+      MONGO_DB: "pramaanhr"
+
+    # Persist PKI outputs (CA + user keystores) to your local project folder
+    volumes:
+      - ./pki:/app/pki
+
+      # Persist KEK file on your host so DB encrypted fields remain decryptable
+      - ./server/config:/app/server/config
+
+volumes:
+  mongo_data:

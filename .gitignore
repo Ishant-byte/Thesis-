@@ -1,0 +1,63 @@
+# Python cache / bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime PKI artifacts (keep folders, not generated keys/certs)
+pki/ca/*
+!pki/ca/.gitkeep
+pki/users/*
+!pki/users/.gitkeep
+
+# Runtime uploads (keep folder, not uploaded files)
+data/uploads/*
+!data/uploads/.gitkeep
+
+# Local database files (if ever added later)
+*.sqlite3
+*.db
+
+# PyInstaller / executable outputs (if used later)
+*.spec

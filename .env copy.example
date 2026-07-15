@@ -1,0 +1,14 @@
+# SajiloHR example environment configuration
+
+# MongoDB
+MONGO_URI=mongodb://localhost:27017
+MONGO_DB=sajilohr
+
+# Server security
+JWT_SECRET=change-this-in-production
+SERVER_KEK_PASSPHRASE=change-me
+
+# Optional: seed first admin (disabled by default)
+SEED_ADMIN_ENABLED=false
+SEED_ADMIN_USER=admin@sajilohr.local
+SEED_ADMIN_PASS=use-a-strong-password
