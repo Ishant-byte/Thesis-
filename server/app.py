@@ -44,13 +44,18 @@ def seed_admin():
     if not seed_user or not seed_pass:
         print("[PramaanHR] Admin seeding enabled, but SEED_ADMIN_USER/SEED_ADMIN_PASS are missing. Skipping.")
         return
-    if db.users.find_one({"username": seed_user}):
+    existing_seed_user = db.users.find_one({"username": seed_user})
+    if existing_seed_user:
+        if existing_seed_user.get("role") == "admin":
+            db.users.update_one({"username": seed_user}, {"$set": {"role": "super_admin"}})
+            log_event("ADMIN_PROMOTED", seed_user, seed_user, "Seed admin promoted to super admin", {})
+            print("[PramaanHR] Promoted configured seed admin to super admin:", seed_user)
         return
 
     cert_info = issue_user_certificate(seed_user, seed_pass, actor_admin=None)
     db.users.insert_one({
         "username": seed_user,
-        "role": "admin",
+        "role": "super_admin",
         "job_role": "System Administrator",
         "department": "Security",
         "password_hash": hash_password(seed_pass),
@@ -75,7 +80,7 @@ def seed_admin():
         "address": "",
         "updated_at": _now(),
     }, fields=["phone","address"]))
-    log_event("ADMIN_SEEDED", seed_user, seed_user, "Admin seeded", {"username": seed_user})
+    log_event("ADMIN_SEEDED", seed_user, seed_user, "Super admin seeded", {"username": seed_user})
     print("[PramaanHR] Seeded admin user:")
     print("  username:", seed_user)
     print("  keystore:", cert_info["pkcs12_path"])

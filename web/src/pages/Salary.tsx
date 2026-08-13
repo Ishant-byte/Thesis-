@@ -14,7 +14,7 @@ interface SalaryRecord {
 
 export function SalaryPage() {
   const { session } = useAuth();
-  const isAdmin = session?.role === "admin";
+  const isAdmin = session?.role === "admin" || session?.role === "super_admin";
   const [records, setRecords] = useState<SalaryRecord[]>([]);
   const [username, setUsername] = useState("");
   const [form, setForm] = useState({ month: "", amount: "", note: "" });

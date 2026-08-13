@@ -44,7 +44,7 @@ class RegisterRequest(BaseModel):
     job_role: str
     department: str
     phone: str | None = None
-    role: str = "employee"  # employee/admin
+    role: str = "employee"
 
 
 @router.post("/request-otp")
@@ -86,20 +86,17 @@ def verify(body: OTPVerify):
 
 @router.post("/register")
 def register(body: RegisterRequest):
-    """Public registration.
-
-    NOTE: In real deployments, admin registration should be controlled. For this
-    academic project, we allow registration for both roles (as requested).
-    """
+    """Public employee registration. Privileged accounts are never self-issued."""
     db = get_db()
     try:
         validate_username(body.username)
         validate_password(body.password)
         validate_name(body.first_name, "First name")
         validate_name(body.last_name, "Last name")
-        role = (body.role or "employee").strip().lower()
-        if role not in ("employee", "admin"):
-            role = "employee"
+        requested_role = (body.role or "employee").strip().lower()
+        if requested_role != "employee":
+            raise HTTPException(status_code=403, detail="Admin accounts require a super admin.")
+        role = "employee"
         validate_job_role(body.job_role, role)
         validate_department(body.department)
         validate_phone(body.phone or "")

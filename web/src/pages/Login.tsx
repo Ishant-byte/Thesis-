@@ -60,7 +60,7 @@ export function LoginPage() {
         throw new Error(`This keystore belongs to ${commonName}, not ${username.trim()}.`);
       }
       const signature_b64 = await signTextP12(p12Bytes, password, nonce);
-      const resp = await post<{ access_token: string; role: "admin" | "employee" }>(
+      const resp = await post<{ access_token: string; role: "super_admin" | "admin" | "employee" }>(
         "/auth/verify",
         { otp_token: otpToken, otp_code: otp.trim(), signature_b64 }
       );

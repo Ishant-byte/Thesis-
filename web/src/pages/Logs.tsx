@@ -18,7 +18,7 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 
 export function LogsPage() {
   const { session } = useAuth();
-  const isAdmin = session?.role === "admin";
+  const isAdmin = session?.role === "admin" || session?.role === "super_admin";
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [filters, setFilters] = useState({ actor: "", target: "", event_type: "", start: "", end: "" });
   const [error, setError] = useState("");

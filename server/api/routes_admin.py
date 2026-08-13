@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 
-from server.api.deps import get_current_user, require_admin
+from server.api.deps import get_current_user, require_admin, require_super_admin
 from server.db.mongo import get_db
 from server.services.validation import validate_username, validate_password, validate_name, validate_department, validate_phone, DEPARTMENTS, STATUSES, validate_status
 from server.services.auth_service import hash_password
@@ -37,11 +37,16 @@ class AdminCreateUser(BaseModel):
     last_name: str
     department: str
     phone: str | None = None
-    role: str = "employee"  # allow admin creation but not from public
+    role: str = "employee"
 
 @router.post("/users/create")
 def admin_create_user(body: AdminCreateUser, user=Depends(get_current_user)):
     require_admin(user)
+    role = (body.role or "employee").strip().lower()
+    if role not in {"employee", "admin"}:
+        raise HTTPException(status_code=400, detail="Role must be employee or admin.")
+    if role == "admin":
+        require_super_admin(user)
     db = get_db()
     try:
         validate_username(body.username)
@@ -55,7 +60,6 @@ def admin_create_user(body: AdminCreateUser, user=Depends(get_current_user)):
 
     if db.users.find_one({"username": body.username}):
         raise HTTPException(status_code=400, detail="User already exists.")
-    role = body.role if body.role in ("employee", "admin") else "employee"
     cert_info = issue_user_certificate(body.username, body.password, actor_admin=user["sub"])
     db.users.insert_one({
         "username": body.username,

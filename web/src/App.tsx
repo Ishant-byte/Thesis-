@@ -24,7 +24,7 @@ function Protected({ children }: { children: ReactNode }) {
 
 function AdminOnly({ children }: { children: ReactNode }) {
   const { session } = useAuth();
-  if (!session || session.role !== "admin") return <Navigate to="/dashboard/profile" replace />;
+  if (!session || !["admin", "super_admin"].includes(session.role)) return <Navigate to="/dashboard/profile" replace />;
   return <>{children}</>;
 }
 
@@ -42,7 +42,7 @@ export default function App() {
           <Route path="/" element={<LandingPage />} />
           <Route path="/portal/:role" element={<PortalMenuPage />} />
           <Route path="/login/:role" element={<LoginPage />} />
-          <Route path="/register/:role" element={<RegisterPage />} />
+          <Route path="/register/employee" element={<RegisterPage />} />
 
           <Route
             path="/dashboard"

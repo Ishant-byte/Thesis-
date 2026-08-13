@@ -15,7 +15,7 @@ interface Notice {
 
 export function NoticesPage() {
   const { session } = useAuth();
-  const isAdmin = session?.role === "admin";
+  const isAdmin = session?.role === "admin" || session?.role === "super_admin";
   const [notices, setNotices] = useState<Notice[]>([]);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");

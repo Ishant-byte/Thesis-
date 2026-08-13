@@ -1,15 +1,14 @@
 import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { health, post } from "../lib/api";
-import { EMAIL_RE, validatePassword, DEPARTMENTS, ADMIN_ROLES, EMPLOYEE_ROLES } from "../lib/constants";
+import { EMAIL_RE, validatePassword, DEPARTMENTS, EMPLOYEE_ROLES } from "../lib/constants";
 import { Card, Alert, Select } from "../components/ui";
 import { Button } from "../components/Button";
 import { Input } from "../components/Input";
 
 export function RegisterPage() {
-  const { role } = useParams<{ role: string }>();
-  const portalRole = role === "admin" ? "admin" : "employee";
+  const portalRole = "employee";
   const navigate = useNavigate();
 
   const [form, setForm] = useState({
@@ -18,8 +17,8 @@ export function RegisterPage() {
     password2: "",
     first_name: "",
     last_name: "",
-    job_role: portalRole === "admin" ? ADMIN_ROLES[0] : EMPLOYEE_ROLES[0],
-    department: portalRole === "admin" ? "Security" : DEPARTMENTS[0],
+    job_role: EMPLOYEE_ROLES[0],
+    department: DEPARTMENTS[0],
     phone: "",
   });
   const [error, setError] = useState("");
@@ -55,7 +54,7 @@ export function RegisterPage() {
         job_role: form.job_role,
         department: form.department,
         phone: form.phone.trim() || null,
-        role: portalRole,
+        role: "employee",
       });
       setSuccess(
         "Registration successful. Your keystore was created at pki/users/<username>/keystore.p12 on the server. Use it during login."
@@ -67,7 +66,7 @@ export function RegisterPage() {
     }
   };
 
-  const roleOptions = portalRole === "admin" ? [...ADMIN_ROLES] : [...EMPLOYEE_ROLES];
+  const roleOptions = [...EMPLOYEE_ROLES];
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-10">
@@ -81,7 +80,7 @@ export function RegisterPage() {
         </Link>
 
         <h1 className="text-2xl font-semibold text-slate-900">
-          {portalRole === "admin" ? "Admin" : "Employee"} Registration
+          Employee Registration
         </h1>
         <p className="mt-1 text-sm text-slate-500">Create an account with a strong password.</p>
 

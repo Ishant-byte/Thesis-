@@ -17,7 +17,7 @@ interface LeaveRequest {
 
 export function LeavePage() {
   const { session } = useAuth();
-  const isAdmin = session?.role === "admin";
+  const isAdmin = session?.role === "admin" || session?.role === "super_admin";
   const [requests, setRequests] = useState<LeaveRequest[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [form, setForm] = useState({ leave_type: "", start_date: "", end_date: "", reason: "" });

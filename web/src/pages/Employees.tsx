@@ -26,6 +26,7 @@ interface CreateUserForm {
 
 export function EmployeesPage() {
   const { session } = useAuth();
+  const isSuperAdmin = session?.role === "super_admin";
   const [users, setUsers] = useState<User[]>([]);
   const [selected, setSelected] = useState("");
   const [showCreate, setShowCreate] = useState(false);
@@ -109,7 +110,7 @@ export function EmployeesPage() {
 
   return (
     <div>
-      <PageHeader title="Employees & Admins" description="Manage user accounts and PKI certificates." />
+      <PageHeader title="Employees & Admins" description="Manage user accounts and PKI certificates. Only a super admin can create administrators." />
       {error && <div className="mb-4"><Alert type="error">{error}</Alert></div>}
       {msg && <div className="mb-4"><Alert type="success">{msg}</Alert></div>}
 
@@ -128,7 +129,9 @@ export function EmployeesPage() {
             <Input label="First Name" value={form.first_name} onChange={(e) => setForm({ ...form, first_name: e.target.value })} />
             <Input label="Last Name" value={form.last_name} onChange={(e) => setForm({ ...form, last_name: e.target.value })} />
             <Select label="Department" value={form.department} onChange={(v) => setForm({ ...form, department: v })} options={[...DEPARTMENTS]} />
-            <Select label="Account Role" value={form.role} onChange={(v) => setForm({ ...form, role: v })} options={["employee", "admin"]} />
+            {isSuperAdmin && (
+              <Select label="Account Role" value={form.role} onChange={(v) => setForm({ ...form, role: v })} options={["employee", "admin"]} />
+            )}
             <Input label="Phone" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
           </div>
           <div className="mt-4">

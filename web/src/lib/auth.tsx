@@ -2,7 +2,7 @@ import { createContext, useContext, useMemo, useState, type ReactNode } from "re
 
 export interface AuthSession {
   token: string;
-  role: "admin" | "employee";
+  role: "super_admin" | "admin" | "employee";
   username: string;
   keystore?: ArrayBuffer;
   keystorePassword?: string;

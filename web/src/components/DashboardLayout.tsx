@@ -115,7 +115,7 @@ export function DashboardLayout() {
 
   if (!session) return null;
 
-  const nav = session.role === "admin" ? adminNav : employeeNav;
+  const nav = session.role === "admin" || session.role === "super_admin" ? adminNav : employeeNav;
   const presenceColor: Record<string, string> = {
     online: "bg-emerald-500",
     away: "bg-amber-400",
@@ -131,7 +131,7 @@ export function DashboardLayout() {
           <Building2 className="h-6 w-6 text-brand-700" />
           <div>
             <div className="text-sm font-semibold text-slate-900">PramaanHR</div>
-            <div className="text-xs text-slate-500 capitalize">{session.role} Portal</div>
+            <div className="text-xs text-slate-500 capitalize">{session.role.replace("_", " ")} Portal</div>
           </div>
         </div>
 

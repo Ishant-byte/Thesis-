@@ -12,6 +12,11 @@ def get_current_user(authorization: str = Header(default="")) -> dict:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 def require_admin(user: dict) -> dict:
-    if user.get("role") != "admin":
+    if user.get("role") not in {"admin", "super_admin"}:
         raise HTTPException(status_code=403, detail="Admin only")
+    return user
+
+def require_super_admin(user: dict) -> dict:
+    if user.get("role") != "super_admin":
+        raise HTTPException(status_code=403, detail="Super admin approval is required")
     return user
