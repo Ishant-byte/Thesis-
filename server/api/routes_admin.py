@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import base64
 import csv
 import io
+import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from cryptography.exceptions import InvalidTag
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 
@@ -15,9 +19,20 @@ from server.services.crypto_encrypt import encrypt_fields, decrypt_fields
 from server.services.audit_service import log_event
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+logger = logging.getLogger(__name__)
+
+PROFILE_DECRYPTION_ERROR = "Profile data is temporarily unavailable. Contact an administrator."
 
 def _now():
     return datetime.now(timezone.utc)
+
+
+def _require_can_manage_account(actor: dict, target: dict) -> None:
+    target_role = target.get("role", "employee")
+    if target_role == "super_admin":
+        raise HTTPException(status_code=403, detail="Super admin accounts cannot be managed here.")
+    if target_role == "admin" and actor.get("role") != "super_admin":
+        raise HTTPException(status_code=403, detail="Only a super admin can manage administrators.")
 
 
 @router.get("/users")
@@ -88,7 +103,11 @@ def admin_create_user(body: AdminCreateUser, user=Depends(get_current_user)):
     }, fields=["phone","address"])
     db.profiles.insert_one(profile_doc)
     log_event("USER_CREATED", user["sub"], body.username, "User created via admin", {"role": role})
-    return {"ok": True}
+    return {
+        "ok": True,
+        "keystore_b64": base64.b64encode(Path(cert_info["pkcs12_path"]).read_bytes()).decode("ascii"),
+        "keystore_filename": f"{body.username}-keystore.p12",
+    }
 
 class UpdateUser(BaseModel):
     first_name: str | None = None
@@ -106,6 +125,7 @@ def update_user(username: str, body: UpdateUser, user=Depends(get_current_user))
     target = db.users.find_one({"username": username})
     if not target:
         raise HTTPException(status_code=404, detail="User not found.")
+    _require_can_manage_account(user, target)
     upd_user = {}
     if body.active is not None:
         upd_user["active"] = bool(body.active)
@@ -123,7 +143,11 @@ def update_user(username: str, body: UpdateUser, user=Depends(get_current_user))
     if not prof:
         prof = {"username": username, "first_name":"", "last_name":"", "department":"HR", "phone":"", "address":"", "updated_at": _now()}
         db.profiles.insert_one(encrypt_fields(prof, fields=["phone","address"]))
-    prof_dec = decrypt_fields(prof, fields=["phone","address"])
+    try:
+        prof_dec = decrypt_fields(prof, fields=["phone", "address"])
+    except InvalidTag:
+        logger.exception("Profile decryption authentication failed for username=%s", username)
+        raise HTTPException(status_code=503, detail=PROFILE_DECRYPTION_ERROR)
     if body.first_name is not None:
         validate_name(body.first_name, "First name")
         prof_dec["first_name"] = body.first_name
@@ -141,6 +165,7 @@ def update_user(username: str, body: UpdateUser, user=Depends(get_current_user))
     if body.address is not None:
         prof_dec["address"] = body.address
     prof_dec["updated_at"] = _now()
+    prof_dec.pop("_id", None)
     prof_enc = encrypt_fields(prof_dec, fields=["phone","address"])
     db.profiles.update_one({"username": username}, {"$set": prof_enc})
     log_event("USER_UPDATED", user["sub"], username, "User/profile updated", {})
@@ -152,6 +177,10 @@ def delete_user(username: str, user=Depends(get_current_user)):
     db = get_db()
     if username == user["sub"]:
         raise HTTPException(status_code=400, detail="You cannot delete yourself.")
+    target = db.users.find_one({"username": username})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+    _require_can_manage_account(user, target)
     res = db.users.delete_one({"username": username})
     db.profiles.delete_one({"username": username})
     log_event("USER_DELETED", user["sub"], username, "User deleted", {})
@@ -167,6 +196,7 @@ def revoke_cert(username: str, body: RevokeBody, user=Depends(get_current_user))
     target = db.users.find_one({"username": username})
     if not target:
         raise HTTPException(status_code=404, detail="User not found.")
+    _require_can_manage_account(user, target)
     serial = target.get("cert_serial")
     if not serial:
         raise HTTPException(status_code=400, detail="User has no certificate.")
@@ -183,6 +213,7 @@ def rotate_cert(username: str, body: RotateBody, user=Depends(get_current_user))
     target = db.users.find_one({"username": username})
     if not target:
         raise HTTPException(status_code=404, detail="User not found.")
+    _require_can_manage_account(user, target)
     try:
         validate_password(body.new_password)
     except ValueError as e:
@@ -195,7 +226,11 @@ def rotate_cert(username: str, body: RotateBody, user=Depends(get_current_user))
         "pkcs12_path": cert_info["pkcs12_path"],
     }})
     log_event("CERT_ROTATED", user["sub"], username, "Certificate rotated", {"serial": cert_info["serial"]})
-    return {"ok": True, "pkcs12_path": cert_info["pkcs12_path"]}
+    return {
+        "ok": True,
+        "keystore_b64": base64.b64encode(Path(cert_info["pkcs12_path"]).read_bytes()).decode("ascii"),
+        "keystore_filename": f"{username}-keystore.p12",
+    }
 
 class NoticeCreate(BaseModel):
     title: str

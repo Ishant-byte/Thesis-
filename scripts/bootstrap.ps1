@@ -24,4 +24,3 @@ Write-Host "Next:" -ForegroundColor Green
 Write-Host "  1) Start MongoDB (mongod)" 
 Write-Host "  2) Terminal A: python -m server.app" 
 Write-Host "  3) Terminal B (web):  scripts\run_web.ps1   → http://localhost:5173"
-Write-Host "     or (desktop):     python -m client.main"

@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $PSScriptRoot
 $WebDir = Join-Path $Root "web"
-$HealthUrl = "http://127.0.0.1:8765/health"
+$HealthUrl = "http://127.0.0.1:8765/api/health"
 
 function Test-ApiServer {
   try {

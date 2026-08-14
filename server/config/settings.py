@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parents[2]  # cipherhr/
 PROJECT_DIR = BASE_DIR
+# Keep direct/local Python launches consistent with Docker Compose's env_file.
+# Existing process environment variables still take precedence.
+load_dotenv(PROJECT_DIR / ".env", override=False)
 PKI_DIR = PROJECT_DIR / "pki"
 CA_DIR = PKI_DIR / "ca"
 USERS_PKI_DIR = PKI_DIR / "users"
@@ -23,7 +27,7 @@ LOCKOUT_SECONDS = 120  # 2 minutes
 # OTP
 OTP_TTL_SECONDS = 120  # 2 minutes
 
-# Demo mode: echo OTP back to the client so the Tkinter UI can show it in a popup.
+# Demo mode: echo OTP back to the browser so the web UI can display it.
 # For production-like behaviour, set OTP_ECHO_TO_CLIENT=false.
 OTP_ECHO_TO_CLIENT = os.getenv("OTP_ECHO_TO_CLIENT", "true").strip().lower() in ("1", "true", "yes", "y")
 

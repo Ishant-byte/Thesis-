@@ -1,13 +1,15 @@
 from __future__ import annotations
 from fastapi import Header, HTTPException
-from server.services.auth_service import decode_jwt
+from server.services.auth_service import AuthStateError, resolve_current_principal
 
 def get_current_user(authorization: str = Header(default="")) -> dict:
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
     token = authorization.split(" ", 1)[1].strip()
     try:
-        return decode_jwt(token)
+        return resolve_current_principal(token)
+    except AuthStateError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
 

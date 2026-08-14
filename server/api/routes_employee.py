@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
 
+from cryptography.exceptions import InvalidTag
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -14,9 +16,20 @@ from server.services.validation import validate_name, validate_phone, validate_d
 from server.services.audit_service import log_event
 
 router = APIRouter(tags=["employee"])
+logger = logging.getLogger(__name__)
+
+PROFILE_DECRYPTION_ERROR = "Profile data is temporarily unavailable. Contact an administrator."
 
 def _now():
     return datetime.now(timezone.utc)
+
+
+def _decrypt_profile(prof: dict, username: str) -> dict:
+    try:
+        return decrypt_fields(prof, fields=["phone", "address"])
+    except InvalidTag:
+        logger.exception("Profile decryption authentication failed for username=%s", username)
+        raise HTTPException(status_code=503, detail=PROFILE_DECRYPTION_ERROR)
 
 @router.get("/me")
 def me(user=Depends(get_current_user)):
@@ -41,7 +54,7 @@ def get_profile(user=Depends(get_current_user)):
     if not prof:
         prof = encrypt_fields({"username": user["sub"], "first_name":"", "last_name":"", "department":"HR", "phone":"", "address":"", "updated_at": _now()}, fields=["phone","address"])
         db.profiles.insert_one(prof)
-    prof = decrypt_fields(prof, fields=["phone","address"])
+    prof = _decrypt_profile(prof, user["sub"])
     prof["_id"] = str(prof["_id"])
     if isinstance(prof.get("updated_at"), datetime):
         prof["updated_at"] = prof["updated_at"].isoformat()
@@ -54,7 +67,7 @@ def update_profile(body: ProfileUpdate, user=Depends(get_current_user)):
     if not prof:
         prof = encrypt_fields({"username": user["sub"], "first_name":"", "last_name":"", "department":"HR", "phone":"", "address":"", "updated_at": _now()}, fields=["phone","address"])
         db.profiles.insert_one(prof)
-    dec = decrypt_fields(prof, fields=["phone","address"])
+    dec = _decrypt_profile(prof, user["sub"])
     if body.first_name is not None:
         validate_name(body.first_name, "First name")
         dec["first_name"] = body.first_name
@@ -72,6 +85,7 @@ def update_profile(body: ProfileUpdate, user=Depends(get_current_user)):
     if body.address is not None:
         dec["address"] = body.address
     dec["updated_at"] = _now()
+    dec.pop("_id", None)
     enc = encrypt_fields(dec, fields=["phone","address"])
     db.profiles.update_one({"username": user["sub"]}, {"$set": enc})
     log_event("PROFILE_UPDATED", user["sub"], user["sub"], "User updated own profile", {})

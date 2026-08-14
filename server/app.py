@@ -4,18 +4,22 @@ import asyncio
 import json
 import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Dict, Any, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from server.config.settings import SERVER_HOST, SERVER_PORT
+from server.api.deps import get_current_user
 from server.db.mongo import get_db
 from server.db.indexes import ensure_indexes
 from server.services.crypto_pki import ensure_ca, issue_user_certificate, is_revoked, verify_data_signature
 from server.services.crypto_encrypt import ensure_kek
-from server.services.auth_service import hash_password, decode_jwt
+from server.services.auth_service import hash_password
 from server.services.audit_service import log_event
 
 from server.api.routes_auth import router as auth_router
@@ -97,12 +101,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(auth_router)
-app.include_router(admin_router)
-app.include_router(employee_router)
-app.include_router(pki_router)
+app.include_router(auth_router, prefix="/api")
+app.include_router(admin_router, prefix="/api")
+app.include_router(employee_router, prefix="/api")
+app.include_router(pki_router, prefix="/api")
 
-@app.get("/health")
+@app.get("/api/health")
 def health():
     # if Mongo is down, get_db() would have exited at startup
     return {"ok": True, "time": _now().isoformat()}
@@ -178,8 +182,7 @@ class WSManager:
 manager = WSManager()
 
 def _auth_from_token(token: str) -> dict:
-    payload = decode_jwt(token)
-    return payload
+    return get_current_user(f"Bearer {token}")
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
@@ -200,6 +203,14 @@ async def websocket_endpoint(ws: WebSocket):
     try:
         while True:
             raw = await ws.receive_text()
+            try:
+                payload = _auth_from_token(token)
+            except Exception:
+                await ws.close(code=4401)
+                await manager.disconnect(username)
+                return
+            username = payload["sub"]
+            role = payload.get("role", "employee")
             msg = json.loads(raw)
             mtype = msg.get("type")
 
@@ -295,6 +306,21 @@ async def websocket_endpoint(ws: WebSocket):
         await manager.disconnect(username)
     except Exception:
         await manager.disconnect(username)
+
+# The production server hosts the React build. Vite remains available for local
+# development and proxies /api and /ws to this process.
+WEB_DIST_DIR = Path(__file__).resolve().parents[1] / "web" / "dist"
+if WEB_DIST_DIR.is_dir():
+    assets_dir = WEB_DIST_DIR / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="web-assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def web_app(full_path: str):
+        requested = (WEB_DIST_DIR / full_path).resolve()
+        if requested.is_file() and WEB_DIST_DIR.resolve() in requested.parents:
+            return FileResponse(requested)
+        return FileResponse(WEB_DIST_DIR / "index.html")
 
 def main():
     # init

@@ -20,6 +20,10 @@ from server.services.crypto_pki import verify_nonce_signature, is_revoked
 
 _runtime_jwt_secret: str | None = None
 
+
+class AuthStateError(ValueError):
+    pass
+
 def _now():
     return datetime.now(timezone.utc)
 
@@ -71,7 +75,9 @@ def reset_failed(username: str):
     db = get_db()
     db.users.update_one({"username": username}, {"$set": {"failed_attempts": 0}})
 
-def request_otp_challenge(username: str, password: str) -> dict:
+def request_otp_challenge(username: str, password: str, portal: str) -> dict:
+    if portal not in {"employee", "admin"}:
+        raise ValueError("Invalid portal selection.")
     user = get_user(username)
     if not user:
         raise ValueError("Invalid credentials")
@@ -81,6 +87,10 @@ def request_otp_challenge(username: str, password: str) -> dict:
         record_failed_login(username)
         log_event("LOGIN_FAILED", username, username, "Wrong password", {}, severity="WARN")
         raise ValueError("Invalid credentials")
+    role = user.get("role", "employee")
+    portal_allowed = role == "employee" if portal == "employee" else role in {"admin", "super_admin"}
+    if not portal_allowed:
+        raise ValueError("This account is not authorized for the selected portal.")
     # success password
     otp_token, otp_code, nonce = create_otp(username)
     print(f"[PramaanHR OTP] user={username} otp={otp_code} (valid 2 min)")
@@ -131,6 +141,19 @@ def issue_jwt(username: str, role: str) -> str:
 
 def decode_jwt(token: str) -> dict:
     return jwt.decode(token, _jwt_secret(), algorithms=["HS256"], issuer=JWT_ISSUER)
+
+
+def resolve_current_principal(token: str) -> dict:
+    payload = decode_jwt(token)
+    username = payload.get("sub")
+    if not username:
+        raise AuthStateError("Invalid token")
+    user = get_user(username)
+    if not user:
+        raise AuthStateError("This account no longer exists.")
+    if not user.get("active", True):
+        raise AuthStateError("This account is inactive.")
+    return {"sub": username, "role": user.get("role", "employee")}
 
 def require_role(payload: dict, roles: set[str]):
     if payload.get("role") not in roles:

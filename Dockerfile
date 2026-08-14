@@ -1,3 +1,11 @@
+FROM node:20-alpine AS web-build
+
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web ./
+RUN npm run build
+
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -15,8 +23,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Copy backend code + PKI folders used by the app
+# Copy backend code, built web application, and PKI folders used by the app
 COPY server /app/server
+COPY --from=web-build /web/dist /app/web/dist
 COPY pki /app/pki
 
 # Entry script waits for Mongo and then starts the server

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
+from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from typing import Literal
 
 from server.db.mongo import get_db
 from server.services.auth_service import request_otp_challenge, verify_login, hash_password
@@ -28,6 +31,7 @@ def _now():
 class OTPRequest(BaseModel):
     username: str
     password: str
+    portal: Literal["employee", "admin"]
 
 
 class OTPVerify(BaseModel):
@@ -52,19 +56,21 @@ def request_otp(body: OTPRequest):
     """Password check + OTP issuance.
 
     Returns otp_token + nonce. In demo mode, the OTP may also be returned to the
-    client so the Tkinter UI can show it in a popup.
+    browser so the web UI can show it during a local demonstration.
     """
     try:
         validate_username(body.username)
         if not body.password:
             raise ValueError("Password is required")
-        return request_otp_challenge(body.username, body.password)
+        return request_otp_challenge(body.username, body.password, body.portal)
     except ValueError as e:
         msg = str(e)
         if msg == "Invalid credentials":
             raise HTTPException(status_code=401, detail=msg)
         if msg.startswith("Account is locked"):
             raise HTTPException(status_code=423, detail=msg)
+        if msg == "This account is not authorized for the selected portal.":
+            raise HTTPException(status_code=403, detail=msg)
         raise HTTPException(status_code=400, detail=msg)
 
 
@@ -145,5 +151,7 @@ def register(body: RegisterRequest):
 
     return {
         "ok": True,
-        "message": "Registration successful. Your keystore is saved under pki/users/<username>/keystore.p12",
+        "message": "Registration successful. Download and securely store your keystore.",
+        "keystore_b64": base64.b64encode(Path(cert_info["pkcs12_path"]).read_bytes()).decode("ascii"),
+        "keystore_filename": f"{body.username}-keystore.p12",
     }

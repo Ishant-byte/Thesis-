@@ -1,5 +1,4 @@
 from __future__ import annotations
-import os
 import tempfile
 from pathlib import Path
 
@@ -10,16 +9,27 @@ from cryptography import x509
 from cryptography.x509.oid import NameOID
 from datetime import datetime, timedelta, timezone
 
-from client.crypto import new_ephemeral, derive_session_key, encrypt_chat, decrypt_chat, sign_text_p12
+from server.services.crypto_sign import sign_hash_with_pkcs12, verify_signature
+from server.api.deps import require_admin, require_super_admin
+from server.api.routes_admin import _require_can_manage_account
+from fastapi import HTTPException
+import pytest
 
-def test_chat_key_agreement_and_encrypt():
-    privA, pubA = new_ephemeral()
-    privB, pubB = new_ephemeral()
-    kA = derive_session_key(privA, pubB, context="sess1")
-    kB = derive_session_key(privB, pubA, context="sess1")
-    assert kA == kB
-    n, ct = encrypt_chat(kA, "hello")
-    assert decrypt_chat(kB, n, ct) == "hello"
+
+def test_admin_role_boundaries():
+    assert require_admin({"role": "admin"})["role"] == "admin"
+    assert require_admin({"role": "super_admin"})["role"] == "super_admin"
+    with pytest.raises(HTTPException):
+        require_admin({"role": "employee"})
+    with pytest.raises(HTTPException):
+        require_super_admin({"role": "admin"})
+    assert require_super_admin({"role": "super_admin"})["role"] == "super_admin"
+    _require_can_manage_account({"role": "admin"}, {"role": "employee"})
+    _require_can_manage_account({"role": "super_admin"}, {"role": "admin"})
+    with pytest.raises(HTTPException):
+        _require_can_manage_account({"role": "admin"}, {"role": "admin"})
+    with pytest.raises(HTTPException):
+        _require_can_manage_account({"role": "super_admin"}, {"role": "super_admin"})
 
 def test_pkcs12_sign_roundtrip():
     with tempfile.TemporaryDirectory() as td:
@@ -45,5 +55,6 @@ def test_pkcs12_sign_roundtrip():
         )
         p12_path = td/"k.p12"
         p12_path.write_bytes(p12)
-        sig_b64 = sign_text_p12(str(p12_path), "Passw0rd!", "nonce")
-        assert isinstance(sig_b64, str) and len(sig_b64) > 10
+        digest = b"document digest"
+        signature, cert_pem = sign_hash_with_pkcs12(p12_path, "Passw0rd!", digest)
+        assert verify_signature(cert_pem, digest, signature)

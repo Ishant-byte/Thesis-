@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
-import { health, post } from "../lib/api";
+import { downloadBase64File, health, post } from "../lib/api";
 import { EMAIL_RE, validatePassword, DEPARTMENTS, EMPLOYEE_ROLES } from "../lib/constants";
 import { Card, Alert, Select } from "../components/ui";
 import { Button } from "../components/Button";
@@ -46,7 +46,7 @@ export function RegisterPage() {
     setLoading(true);
     try {
       await health();
-      await post("/auth/register", {
+      const result = await post<{ keystore_b64: string; keystore_filename: string }>("/auth/register", {
         username: form.username.trim(),
         password: form.password,
         first_name: form.first_name.trim(),
@@ -56,8 +56,9 @@ export function RegisterPage() {
         phone: form.phone.trim() || null,
         role: "employee",
       });
+      downloadBase64File(result.keystore_b64, result.keystore_filename);
       setSuccess(
-        "Registration successful. Your keystore was created at pki/users/<username>/keystore.p12 on the server. Use it during login."
+        "Registration successful. Your keystore has been downloaded. Keep it secure—you need it to sign in."
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : "Registration failed");

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "../lib/auth";
-import { get, post, del } from "../lib/api";
+import { get, post, del, downloadBase64File } from "../lib/api";
 import { DEPARTMENTS } from "../lib/constants";
 import { PageHeader, Alert, Table, Card, Select } from "../components/ui";
 import { Button } from "../components/Button";
@@ -43,6 +43,8 @@ export function EmployeesPage() {
   const [rotatePassword, setRotatePassword] = useState("");
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
+  const selectedUser = users.find((user) => user.username === selected);
+  const canManageSelected = selectedUser?.role === "employee" || (isSuperAdmin && selectedUser?.role === "admin");
 
   const refresh = async () => {
     if (!session) return;
@@ -61,8 +63,13 @@ export function EmployeesPage() {
   const createUser = async () => {
     if (!session) return;
     try {
-      await post("/admin/users/create", { ...form, phone: form.phone || null }, session.token);
-      setMsg("User created. Keystore saved on server.");
+      const result = await post<{ keystore_b64: string; keystore_filename: string }>(
+        "/admin/users/create",
+        { ...form, phone: form.phone || null },
+        session.token
+      );
+      downloadBase64File(result.keystore_b64, result.keystore_filename);
+      setMsg("User created. Their keystore has been downloaded; transfer it securely.");
       setShowCreate(false);
       refresh();
     } catch (e) {
@@ -96,12 +103,13 @@ export function EmployeesPage() {
   const rotateCert = async () => {
     if (!session || !selected || !rotatePassword) return;
     try {
-      const resp = await post<{ pkcs12_path: string }>(
+      const resp = await post<{ keystore_b64: string; keystore_filename: string }>(
         `/admin/users/${selected}/rotate-cert`,
         { new_password: rotatePassword },
         session.token
       );
-      setMsg(`Certificate rotated. New keystore: ${resp.pkcs12_path}`);
+      downloadBase64File(resp.keystore_b64, resp.keystore_filename);
+      setMsg("Certificate rotated. The replacement keystore has been downloaded.");
       setRotatePassword("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Rotate failed");
@@ -155,13 +163,17 @@ export function EmployeesPage() {
       {selected && (
         <Card className="mt-6">
           <h3 className="mb-4 font-medium text-slate-900">Actions for {selected}</h3>
-          <div className="flex flex-wrap items-end gap-4">
-            <Input label="Revoke Reason" value={revokeReason} onChange={(e) => setRevokeReason(e.target.value)} className="max-w-xs" />
-            <Button variant="secondary" onClick={revokeCert}>Revoke Certificate</Button>
-            <Input label="New Keystore Password" type="password" value={rotatePassword} onChange={(e) => setRotatePassword(e.target.value)} className="max-w-xs" />
-            <Button variant="secondary" onClick={rotateCert}>Rotate Certificate</Button>
-            <Button variant="danger" onClick={deleteUser}>Delete User</Button>
-          </div>
+          {canManageSelected ? (
+            <div className="flex flex-wrap items-end gap-4">
+              <Input label="Revoke Reason" value={revokeReason} onChange={(e) => setRevokeReason(e.target.value)} className="max-w-xs" />
+              <Button variant="secondary" onClick={revokeCert}>Revoke Certificate</Button>
+              <Input label="New Keystore Password" type="password" value={rotatePassword} onChange={(e) => setRotatePassword(e.target.value)} className="max-w-xs" />
+              <Button variant="secondary" onClick={rotateCert}>Rotate Certificate</Button>
+              <Button variant="danger" onClick={deleteUser}>Delete User</Button>
+            </div>
+          ) : (
+            <Alert type="info">This privileged account can only be managed through the super-admin policy.</Alert>
+          )}
         </Card>
       )}
     </div>

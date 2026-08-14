@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
-import { health, post } from "../lib/api";
+import { consumeLogoutReason, health, post } from "../lib/api";
 import { getCertFromP12, signTextP12, loadKeystoreFromFile } from "../lib/crypto";
 import { useAuth } from "../lib/auth";
 import { Card, Alert } from "../components/ui";
@@ -13,6 +13,7 @@ export function LoginPage() {
   const portalRole = role === "admin" ? "admin" : "employee";
   const navigate = useNavigate();
   const { setSession } = useAuth();
+  const [logoutReason] = useState(consumeLogoutReason);
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -32,7 +33,7 @@ export function LoginPage() {
       await health();
       const resp = await post<{ otp_token: string; nonce: string; otp_code?: string }>(
         "/auth/request-otp",
-        { username: username.trim(), password }
+        { username: username.trim(), password, portal: portalRole }
       );
       setOtpToken(resp.otp_token);
       setNonce(resp.nonce);
@@ -92,6 +93,12 @@ export function LoginPage() {
 
         <h1 className="text-2xl font-semibold text-slate-900">Sign In</h1>
         <p className="mt-1 text-sm capitalize text-slate-500">{portalRole} portal</p>
+
+        {logoutReason && (
+          <div className="mt-4">
+            <Alert type="info">{logoutReason}</Alert>
+          </div>
+        )}
 
         {error && (
           <div className="mt-4">

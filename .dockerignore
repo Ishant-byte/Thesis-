@@ -5,6 +5,8 @@ __pycache__/
 venv/
 env/
 ENV/
+web/node_modules/
+web/dist/
 
 .git/
 .vscode/

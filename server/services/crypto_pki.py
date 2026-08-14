@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Any
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -74,6 +74,43 @@ def get_ca_cert_pem() -> str:
     ensure_ca()
     return CA_CERT_PATH.read_text()
 
+
+def canonicalize_serial(serial: int | str) -> str:
+    if isinstance(serial, int):
+        value = serial
+    else:
+        serial_text = str(serial).strip()
+        if not serial_text:
+            raise ValueError("Certificate serial is required.")
+        if not serial_text.isdigit():
+            raise ValueError("Certificate serial must use canonical decimal digits.")
+        value = int(serial_text, 10)
+    if value < 0:
+        raise ValueError("Certificate serial must be non-negative.")
+    return str(value)
+
+
+def certificate_serial(cert: x509.Certificate) -> str:
+    return canonicalize_serial(cert.serial_number)
+
+
+def certificate_common_name(cert: x509.Certificate) -> str | None:
+    attrs = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    if not attrs:
+        return None
+    value = attrs[0].value.strip()
+    return value or None
+
+
+def get_user_certificate_enrollment(username: str) -> dict[str, Any] | None:
+    if not username:
+        return None
+    db = get_db()
+    return db.users.find_one(
+        {"username": username},
+        {"_id": 0, "username": 1, "cert_serial": 1, "cert_pem": 1, "active": 1},
+    )
+
 def _user_dir(username: str) -> Path:
     d = USERS_PKI_DIR / username
     d.mkdir(parents=True, exist_ok=True)
@@ -133,7 +170,7 @@ def issue_user_certificate(username: str, password: str, actor_admin: str | None
         format=serialization.PublicFormat.SubjectPublicKeyInfo
     ).decode("utf-8")
 
-    serial_str = str(cert.serial_number)
+    serial_str = certificate_serial(cert)
 
     if actor_admin:
         log_event(
@@ -167,24 +204,26 @@ def verify_nonce_signature(nonce: str, signature_b64: str, cert_pem: str) -> boo
     except Exception:
         return False
 
-def get_crl_doc() -> dict:
+def get_crl_doc(create_if_missing: bool = True) -> dict:
     db = get_db()
     doc = db.crl.find_one({"_id": "crl"})
-    if not doc:
+    if not doc and create_if_missing:
         doc = {"_id": "crl", "revoked_serials": [], "updated_at": _utcnow(), "updated_by": None}
         db.crl.insert_one(doc)
+    elif not doc:
+        doc = {"_id": "crl", "revoked_serials": [], "updated_at": None, "updated_by": None}
     return doc
 
-def is_revoked(serial: str) -> bool:
-    doc = get_crl_doc()
-    serial_str = str(serial)
+def is_revoked(serial: str, create_if_missing: bool = True) -> bool:
+    doc = get_crl_doc(create_if_missing=create_if_missing)
+    serial_str = canonicalize_serial(serial)
     return serial_str in set(str(x) for x in doc.get("revoked_serials", []))
 
 def revoke_serial(serial: str, actor_admin: str, target_username: str | None = None, reason: str="unspecified") -> None:
     db = get_db()
     doc = get_crl_doc()
     revoked = set(str(x) for x in doc.get("revoked_serials", []))
-    serial_str = str(serial)
+    serial_str = canonicalize_serial(serial)
     revoked.add(serial_str)
     db.crl.update_one({"_id":"crl"}, {"$set": {"revoked_serials": sorted(list(revoked)), "updated_at": _utcnow(), "updated_by": actor_admin}})
     log_event(
@@ -198,7 +237,7 @@ def revoke_serial(serial: str, actor_admin: str, target_username: str | None = N
 
 def export_crl_json() -> dict:
     doc = get_crl_doc()
-    return {"revoked_serials": [str(x) for x in doc.get("revoked_serials", [])]}
+    return {"revoked_serials": [canonicalize_serial(x) for x in doc.get("revoked_serials", [])]}
 
 
 def verify_data_signature(data: bytes, signature_b64: str, cert_pem: str) -> bool:
