@@ -1,37 +1,37 @@
-import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { downloadBase64File, health, post } from "../lib/api";
-import { EMAIL_RE, validatePassword, DEPARTMENTS, EMPLOYEE_ROLES } from "../lib/constants";
-import { Card, Alert, Select } from "../components/ui";
+import { validatePassword } from "../lib/constants";
+import { Card, Alert } from "../components/ui";
 import { Button } from "../components/Button";
 import { Input } from "../components/Input";
 
 export function RegisterPage() {
-  const portalRole = "employee";
   const navigate = useNavigate();
-
+  const [searchParams] = useSearchParams();
   const [form, setForm] = useState({
-    username: "",
+    token: searchParams.get("token") ?? "",
     password: "",
     password2: "",
-    first_name: "",
-    last_name: "",
-    job_role: EMPLOYEE_ROLES[0],
-    department: DEPARTMENTS[0],
-    phone: "",
   });
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [activatedRole, setActivatedRole] = useState<"admin" | "employee">("employee");
   const [loading, setLoading] = useState(false);
 
-  const set = (k: keyof typeof form, v: string) => setForm((f) => ({ ...f, [k]: v }));
+  useEffect(() => {
+    const token = searchParams.get("token") ?? "";
+    setForm((current) => (current.token === token ? current : { ...current, token }));
+  }, [searchParams]);
+
+  const set = (k: keyof typeof form, v: string) => setForm((current) => ({ ...current, [k]: v }));
 
   const submit = async () => {
     setError("");
     setSuccess("");
-    if (!EMAIL_RE.test(form.username.trim())) {
-      setError("Username must be a valid email address.");
+    if (!form.token.trim()) {
+      setError("Activation token is required.");
       return;
     }
     if (form.password !== form.password2) {
@@ -46,44 +46,35 @@ export function RegisterPage() {
     setLoading(true);
     try {
       await health();
-      const result = await post<{ keystore_b64: string; keystore_filename: string }>("/auth/register", {
-        username: form.username.trim(),
-        password: form.password,
-        first_name: form.first_name.trim(),
-        last_name: form.last_name.trim(),
-        job_role: form.job_role,
-        department: form.department,
-        phone: form.phone.trim() || null,
-        role: "employee",
-      });
-      downloadBase64File(result.keystore_b64, result.keystore_filename);
-      setSuccess(
-        "Registration successful. Your keystore has been downloaded. Keep it secure—you need it to sign in."
+      const result = await post<{ keystore_b64: string; keystore_filename: string; role: "admin" | "employee" }>(
+        "/auth/activate",
+        { token: form.token.trim(), password: form.password }
       );
+      downloadBase64File(result.keystore_b64, result.keystore_filename);
+      setActivatedRole(result.role);
+      setSuccess("Activation successful. Your keystore has been downloaded. Keep it secure because you need it to sign in.");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Registration failed");
+      setError(e instanceof Error ? e.message : "Activation failed");
     } finally {
       setLoading(false);
     }
   };
 
-  const roleOptions = [...EMPLOYEE_ROLES];
-
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-10">
       <Card className="w-full max-w-lg">
         <Link
-          to={`/portal/${portalRole}`}
+          to="/"
           className="mb-6 inline-flex items-center gap-1 text-sm text-slate-500 hover:text-slate-700"
         >
           <ArrowLeft className="h-4 w-4" />
           Back
         </Link>
 
-        <h1 className="text-2xl font-semibold text-slate-900">
-          Employee Registration
-        </h1>
-        <p className="mt-1 text-sm text-slate-500">Create an account with a strong password.</p>
+        <h1 className="text-2xl font-semibold text-slate-900">Activate Account</h1>
+        <p className="mt-1 text-sm text-slate-500">
+          Use the one-time activation token from your administrator, then choose your own password.
+        </p>
 
         {error && (
           <div className="mt-4">
@@ -93,7 +84,7 @@ export function RegisterPage() {
         {success && (
           <div className="mt-4 space-y-3">
             <Alert type="success">{success}</Alert>
-            <Button className="w-full" onClick={() => navigate(`/login/${portalRole}`)}>
+            <Button className="w-full" onClick={() => navigate(`/login/${activatedRole === "employee" ? "employee" : "admin"}`)}>
               Go to Sign In
             </Button>
           </div>
@@ -101,19 +92,29 @@ export function RegisterPage() {
 
         {!success && (
           <>
-            <div className="mt-6 grid gap-4 sm:grid-cols-2">
-              <Input label="Email" type="email" value={form.username} onChange={(e) => set("username", e.target.value)} />
-              <Input label="Phone (optional)" value={form.phone} onChange={(e) => set("phone", e.target.value)} />
-              <Input label="Password" type="password" value={form.password} onChange={(e) => set("password", e.target.value)} />
-              <Input label="Confirm Password" type="password" value={form.password2} onChange={(e) => set("password2", e.target.value)} />
-              <Input label="First Name" value={form.first_name} onChange={(e) => set("first_name", e.target.value)} />
-              <Input label="Last Name" value={form.last_name} onChange={(e) => set("last_name", e.target.value)} />
-              <Select label="Job Role" value={form.job_role} onChange={(v) => set("job_role", v)} options={roleOptions} />
-              <Select label="Department" value={form.department} onChange={(v) => set("department", v)} options={[...DEPARTMENTS]} />
+            <div className="mt-6 grid gap-4">
+              <Input
+                label="Activation Token"
+                value={form.token}
+                onChange={(e) => set("token", e.target.value)}
+                placeholder="Paste your one-time token"
+              />
+              <Input
+                label="Password"
+                type="password"
+                value={form.password}
+                onChange={(e) => set("password", e.target.value)}
+              />
+              <Input
+                label="Confirm Password"
+                type="password"
+                value={form.password2}
+                onChange={(e) => set("password2", e.target.value)}
+              />
             </div>
             <div className="mt-6">
               <Button className="w-full" onClick={submit} disabled={loading}>
-                {loading ? "Creating account…" : "Create Account"}
+                {loading ? "Activating..." : "Activate Account"}
               </Button>
             </div>
           </>

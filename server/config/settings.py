@@ -26,6 +26,7 @@ LOCKOUT_SECONDS = 120  # 2 minutes
 
 # OTP
 OTP_TTL_SECONDS = 120  # 2 minutes
+ACTIVATION_TTL_SECONDS = int(os.getenv("ACTIVATION_TTL_SECONDS", str(8 * 60 * 60)))  # 8 hours
 
 # Demo mode: echo OTP back to the browser so the web UI can display it.
 # For production-like behaviour, set OTP_ECHO_TO_CLIENT=false.

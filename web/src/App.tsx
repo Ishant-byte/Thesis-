@@ -42,6 +42,7 @@ export default function App() {
           <Route path="/" element={<LandingPage />} />
           <Route path="/portal/:role" element={<PortalMenuPage />} />
           <Route path="/login/:role" element={<LoginPage />} />
+          <Route path="/activate" element={<RegisterPage />} />
           <Route path="/register/employee" element={<RegisterPage />} />
 
           <Route

@@ -7,6 +7,10 @@ export function PortalMenuPage() {
   const { role } = useParams<{ role: string }>();
   const portalRole = role === "admin" ? "admin" : "employee";
   const title = portalRole === "admin" ? "Admin Portal" : "Employee Portal";
+  const description =
+    portalRole === "admin"
+      ? "Sign in to your administrator account, or activate a newly issued admin account."
+      : "Sign in or activate your employee account.";
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4">
@@ -16,19 +20,15 @@ export function PortalMenuPage() {
           Back
         </Link>
         <h1 className="text-2xl font-semibold text-slate-900">{title}</h1>
-        <p className="mt-2 text-sm text-slate-500">
-          {portalRole === "admin" ? "Sign in to your administrator account." : "Sign in or create an employee account."}
-        </p>
+        <p className="mt-2 text-sm text-slate-500">{description}</p>
 
         <div className="mt-8 space-y-3">
           <Link to={`/login/${portalRole}`} className="block">
             <Button className="w-full">Sign In</Button>
           </Link>
-          {portalRole === "employee" && (
-            <Link to="/register/employee" className="block">
-              <Button variant="secondary" className="w-full">Create Account</Button>
-            </Link>
-          )}
+          <Link to="/activate" className="block">
+            <Button variant="secondary" className="w-full">Activate Account</Button>
+          </Link>
         </div>
       </Card>
     </div>

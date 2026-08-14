@@ -145,7 +145,7 @@ export function LoginPage() {
                   onChange={(e) => setKeystoreFile(e.target.files?.[0] ?? null)}
                 />
                 <p className="mt-1 text-xs text-slate-400">
-                  Located at pki/users/&lt;username&gt;/keystore.p12 after registration
+                  Located at pki/users/&lt;username&gt;/keystore.p12 after activation
                 </p>
               </div>
             </>

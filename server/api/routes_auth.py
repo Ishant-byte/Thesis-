@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
@@ -8,24 +9,36 @@ from pydantic import BaseModel
 from typing import Literal
 
 from server.db.mongo import get_db
-from server.services.auth_service import request_otp_challenge, verify_login, hash_password
+from server.services.auth_service import (
+    hash_activation_token,
+    hash_password,
+    request_otp_challenge,
+    verify_login,
+)
 from server.services.validation import (
     validate_username,
     validate_password,
-    validate_name,
-    validate_department,
-    validate_phone,
-    validate_job_role,
 )
 from server.services.crypto_pki import issue_user_certificate
-from server.services.crypto_encrypt import encrypt_fields
 from server.services.audit_service import log_event
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+logger = logging.getLogger(__name__)
 
 
 def _now():
     return datetime.now(timezone.utc)
+
+
+def _activation_invalid_or_expired() -> HTTPException:
+    return HTTPException(status_code=400, detail="Activation token is invalid or expired.")
+
+
+def _clear_activation_claim(db, username: str, token_hash: str) -> None:
+    db.users.update_one(
+        {"username": username, "activation.token_hash": token_hash},
+        {"$set": {"activation.claimed_at": None}},
+    )
 
 
 class OTPRequest(BaseModel):
@@ -51,6 +64,11 @@ class RegisterRequest(BaseModel):
     role: str = "employee"
 
 
+class ActivateRequest(BaseModel):
+    token: str
+    password: str
+
+
 @router.post("/request-otp")
 def request_otp(body: OTPRequest):
     """Password check + OTP issuance.
@@ -68,6 +86,8 @@ def request_otp(body: OTPRequest):
         if msg == "Invalid credentials":
             raise HTTPException(status_code=401, detail=msg)
         if msg == "This account is inactive.":
+            raise HTTPException(status_code=403, detail=msg)
+        if msg == "This account is pending activation.":
             raise HTTPException(status_code=403, detail=msg)
         if msg.startswith("Account is locked"):
             raise HTTPException(status_code=423, detail=msg)
@@ -96,66 +116,81 @@ def verify(body: OTPVerify):
 
 @router.post("/register")
 def register(body: RegisterRequest):
-    """Public employee registration. Privileged accounts are never self-issued."""
+    raise HTTPException(status_code=403, detail="Self-registration is disabled. Contact an administrator for an activation link.")
+
+
+@router.post("/activate")
+def activate_account(body: ActivateRequest):
     db = get_db()
+    token = (body.token or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Activation token is required.")
     try:
-        validate_username(body.username)
         validate_password(body.password)
-        validate_name(body.first_name, "First name")
-        validate_name(body.last_name, "Last name")
-        requested_role = (body.role or "employee").strip().lower()
-        if requested_role != "employee":
-            raise HTTPException(status_code=403, detail="Admin accounts require a super admin.")
-        role = "employee"
-        validate_job_role(body.job_role, role)
-        validate_department(body.department)
-        validate_phone(body.phone or "")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    if db.users.find_one({"username": body.username}):
-        raise HTTPException(status_code=409, detail="Username already exists.")
+    token_hash = hash_activation_token(token)
+    user = db.users.find_one({"activation.token_hash": token_hash})
+    if not user:
+        raise _activation_invalid_or_expired()
 
-    cert_info = issue_user_certificate(body.username, body.password, actor_admin=None)
+    activation = user.get("activation") or {}
+    expires_at = activation.get("expires_at")
+    if user.get("active", True) or not activation.get("token_hash") or expires_at is None:
+        raise _activation_invalid_or_expired()
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= _now():
+        raise _activation_invalid_or_expired()
 
-    db.users.insert_one(
-        {
-            "username": body.username,
-            "role": role,
-            "job_role": body.job_role,
-            # Keep department in users for quick presence display (non-sensitive).
-            "department": body.department,
-            "password_hash": hash_password(body.password),
-            "created_at": _now(),
-            "cert_pem": cert_info["cert_pem"],
-            "cert_serial": str(cert_info["serial"]),
-            "public_key_pem": cert_info["public_key_pem"],
-            "pkcs12_path": cert_info["pkcs12_path"],
-            "failed_attempts": 0,
-            "locked_until": None,
-            "presence_state": "offline",
-            "last_seen": _now(),
-            "active": True,
-        }
+    claim = db.users.update_one(
+        {"username": user["username"], "active": False, "activation.token_hash": token_hash, "activation.claimed_at": None},
+        {"$set": {"activation.claimed_at": _now()}},
     )
+    if getattr(claim, "matched_count", 1) != 1:
+        raise HTTPException(status_code=400, detail="Activation token is invalid or already used.")
 
-    profile_doc = {
-        "username": body.username,
-        "first_name": body.first_name,
-        "last_name": body.last_name,
-        "job_role": body.job_role,
-        "department": body.department,
-        "phone": body.phone or "",
-        "address": "",
-        "updated_at": _now(),
-    }
-    db.profiles.insert_one(encrypt_fields(profile_doc, fields=["phone", "address"]))
+    try:
+        cert_info = issue_user_certificate(user["username"], body.password, actor_admin=None)
+        finish = db.users.update_one(
+            {"username": user["username"], "activation.token_hash": token_hash},
+            {
+                "$set": {
+                    "password_hash": hash_password(body.password),
+                    "active": True,
+                    "cert_pem": cert_info["cert_pem"],
+                    "cert_serial": str(cert_info["serial"]),
+                    "public_key_pem": cert_info["public_key_pem"],
+                    "pkcs12_path": cert_info["pkcs12_path"],
+                    "presence_state": "offline",
+                    "last_seen": _now(),
+                },
+                "$unset": {"activation": ""},
+            },
+        )
+        if getattr(finish, "matched_count", 1) != 1:
+            raise HTTPException(status_code=400, detail="Activation token is invalid or already used.")
+    except HTTPException:
+        _clear_activation_claim(db, user["username"], token_hash)
+        raise
+    except Exception:
+        _clear_activation_claim(db, user["username"], token_hash)
+        logger.exception("Activation certificate issuance failed for username=%s", user["username"])
+        raise HTTPException(status_code=503, detail="Activation failed. Contact an administrator for a new activation link.")
 
-    log_event("USER_REGISTERED", body.username, body.username, "User registered", {"role": role})
-
+    log_event(
+        "USER_ACTIVATED",
+        user["username"],
+        user["username"],
+        "Pending account activated",
+        {"role": user.get("role", "employee"), "serial": str(cert_info["serial"])},
+    )
     return {
         "ok": True,
-        "message": "Registration successful. Download and securely store your keystore.",
+        "username": user["username"],
+        "role": user.get("role", "employee"),
+        "message": "Activation successful. Download and securely store your keystore.",
         "keystore_b64": base64.b64encode(Path(cert_info["pkcs12_path"]).read_bytes()).decode("ascii"),
-        "keystore_filename": f"{body.username}-keystore.p12",
+        "keystore_filename": f"{user['username']}-keystore.p12",
     }

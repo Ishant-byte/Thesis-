@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 
@@ -10,7 +12,7 @@ from passlib.hash import argon2
 
 from server.config.settings import (
     JWT_SECRET, JWT_ISSUER, JWT_TTL_SECONDS,
-    MAX_FAILED_ATTEMPTS, LOCKOUT_SECONDS
+    MAX_FAILED_ATTEMPTS, LOCKOUT_SECONDS, ACTIVATION_TTL_SECONDS
 )
 from server.config.settings import OTP_ECHO_TO_CLIENT
 from server.db.mongo import get_db
@@ -51,7 +53,25 @@ def get_user(username: str) -> Optional[dict]:
 
 def ensure_active_user(user: dict) -> None:
     if not user.get("active", True):
+        activation = user.get("activation") or {}
+        if activation.get("token_hash"):
+            raise ValueError("This account is pending activation.")
         raise ValueError("This account is inactive.")
+
+
+def hash_activation_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def issue_activation_token() -> tuple[str, dict]:
+    token = secrets.token_urlsafe(32)
+    now = _now()
+    return token, {
+        "token_hash": hash_activation_token(token),
+        "issued_at": now,
+        "expires_at": now + timedelta(seconds=ACTIVATION_TTL_SECONDS),
+        "claimed_at": None,
+    }
 
 def set_lock(username: str, seconds: int):
     db = get_db()

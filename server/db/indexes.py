@@ -8,6 +8,7 @@ def ensure_indexes():
     db.users.create_index([("username", ASCENDING)], unique=True)
     db.users.create_index([("role", ASCENDING)])
     db.users.create_index([("locked_until", ASCENDING)])
+    db.users.create_index([("activation.token_hash", ASCENDING)], unique=True, sparse=True)
 
     db.audit_logs.create_index([("timestamp", DESCENDING)])
     db.audit_logs.create_index([("actor_username", ASCENDING), ("timestamp", DESCENDING)])

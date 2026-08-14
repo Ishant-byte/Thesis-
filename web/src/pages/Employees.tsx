@@ -10,6 +10,8 @@ interface User {
   username: string;
   role: string;
   active: boolean;
+  activation_pending?: boolean;
+  activation_expires_at?: string;
   presence_state: string;
   department?: string;
   cert_serial?: string;
@@ -17,7 +19,6 @@ interface User {
 
 interface CreateUserForm {
   username: string;
-  password: string;
   first_name: string;
   last_name: string;
   department: string;
@@ -33,27 +34,47 @@ export function EmployeesPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState<CreateUserForm>({
     username: "",
-    password: "",
     first_name: "",
     last_name: "",
     department: DEPARTMENTS[0],
     phone: "",
     role: "employee",
   });
+  const [activationResult, setActivationResult] = useState<{
+    username: string;
+    token: string;
+    expiresAt: string;
+  } | null>(null);
   const [revokeReason, setRevokeReason] = useState("compromised");
   const [rotatePassword, setRotatePassword] = useState("");
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [copiedField, setCopiedField] = useState<"link" | "token" | "">("");
   const actionsRef = useRef<HTMLDivElement>(null);
   const selectedUser = users.find((user) => user.username === selected);
   const canManageSelected = selectedUser?.role === "employee" || (isSuperAdmin && selectedUser?.role === "admin");
+  const selectedIsPendingActivation = Boolean(selectedUser?.activation_pending);
   const canDeactivateSelected = Boolean(
     selectedUser && canManageSelected && selectedUser.active && selectedUser.username !== session?.username
   );
   const canReactivateSelected = Boolean(
-    selectedUser && canManageSelected && !selectedUser.active && selectedUser.username !== session?.username
+    selectedUser &&
+      canManageSelected &&
+      !selectedUser.active &&
+      !selectedIsPendingActivation &&
+      selectedUser.username !== session?.username
   );
+
+  const activationLink = activationResult
+    ? `${window.location.origin}/activate?token=${encodeURIComponent(activationResult.token)}`
+    : "";
+
+  const accountStatus = (user: User) => {
+    if (user.active) return "Active";
+    if (user.activation_pending) return "Pending activation";
+    return "Inactive";
+  };
 
   const refresh = async (announce = false) => {
     if (!session) return;
@@ -78,17 +99,43 @@ export function EmployeesPage() {
     if (selected) actionsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [selected]);
 
+  const copyActivationValue = async (kind: "link" | "token", value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedField(kind);
+      window.setTimeout(() => {
+        setCopiedField((current) => (current === kind ? "" : current));
+      }, 2000);
+    } catch {
+      setError("Copy failed. Copy the activation details manually.");
+    }
+  };
+
   const createUser = async () => {
     if (!session) return;
     try {
-      const result = await post<{ keystore_b64: string; keystore_filename: string }>(
+      setError("");
+      setMsg("");
+      const result = await post<{ activation_token: string; activation_expires_at: string }>(
         "/admin/users/create",
         { ...form, phone: form.phone || null },
         session.token
       );
-      downloadBase64File(result.keystore_b64, result.keystore_filename);
-      setMsg("User created. Their keystore has been downloaded; transfer it securely.");
+      setActivationResult({
+        username: form.username.trim(),
+        token: result.activation_token,
+        expiresAt: result.activation_expires_at,
+      });
+      setMsg("User created in pending activation. Share the one-time activation link securely.");
       setShowCreate(false);
+      setForm({
+        username: "",
+        first_name: "",
+        last_name: "",
+        department: DEPARTMENTS[0],
+        phone: "",
+        role: "employee",
+      });
       refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Create failed");
@@ -170,15 +217,52 @@ export function EmployeesPage() {
           <Button variant="secondary" onClick={() => refresh(true)} disabled={refreshing}>
             {refreshing ? "Refreshing..." : "Refresh"}
           </Button>
-          <Button onClick={() => setShowCreate(!showCreate)}>{showCreate ? "Cancel" : "Create User"}</Button>
+          <Button
+            onClick={() => {
+              setShowCreate(!showCreate);
+              setActivationResult(null);
+            }}
+          >
+            {showCreate ? "Cancel" : "Create User"}
+          </Button>
         </div>
       </Card>
+
+      {activationResult && (
+        <Card className="mb-6 max-w-3xl">
+          <div className="space-y-4">
+            <Alert type="success">
+              {activationResult.username} is pending activation until{" "}
+              {new Date(activationResult.expiresAt).toLocaleString()}.
+            </Alert>
+            <p className="text-sm text-slate-600">
+              Share this one-time activation link or token securely. The user sets their own password during activation,
+              and their certificate is issued only after activation succeeds.
+            </p>
+            <Alert type="info">
+              This credential is single-use and expires at {new Date(activationResult.expiresAt).toLocaleString()}.
+              Do not send it in a public channel.
+            </Alert>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+              <Input label="Activation Link" value={activationLink} readOnly className="sm:flex-1" />
+              <Button variant="secondary" onClick={() => copyActivationValue("link", activationLink)}>
+                {copiedField === "link" ? "Copied" : "Copy Link"}
+              </Button>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+              <Input label="Activation Token" value={activationResult.token} readOnly className="sm:flex-1" />
+              <Button variant="secondary" onClick={() => copyActivationValue("token", activationResult.token)}>
+                {copiedField === "token" ? "Copied" : "Copy Token"}
+              </Button>
+            </div>
+          </div>
+        </Card>
+      )}
 
       {showCreate && (
         <Card className="mb-6 max-w-2xl">
           <div className="grid gap-4 sm:grid-cols-2">
             <Input label="Email" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
-            <Input label="Password" type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
             <Input label="First Name" value={form.first_name} onChange={(e) => setForm({ ...form, first_name: e.target.value })} />
             <Input label="Last Name" value={form.last_name} onChange={(e) => setForm({ ...form, last_name: e.target.value })} />
             <Select label="Department" value={form.department} onChange={(v) => setForm({ ...form, department: v })} options={[...DEPARTMENTS]} />
@@ -187,7 +271,10 @@ export function EmployeesPage() {
             )}
             <Input label="Phone" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
           </div>
-          <div className="mt-4">
+          <div className="mt-4 space-y-3">
+            <Alert type="info">
+              New accounts start inactive and pending activation.
+            </Alert>
             <Button onClick={createUser}>Create User</Button>
           </div>
         </Card>
@@ -197,7 +284,7 @@ export function EmployeesPage() {
         headers={["Role", "Account", "Presence", "Department", "Username", "Actions"]}
         rows={users.map((u) => [
           u.role,
-          u.active ? "Active" : "Inactive",
+          accountStatus(u),
           u.presence_state ?? "offline",
           u.department ?? "-",
           u.username,
@@ -212,8 +299,15 @@ export function EmployeesPage() {
           {canManageSelected ? (
             <div className="space-y-4">
               <Alert type="info">
-                Account status: {selectedUser?.active ? "Active" : "Inactive"}. Deactivation disables access and permanently revokes the current certificate. Reactivation issues a new certificate; it never restores the old one.
+                Account status: {selectedUser ? accountStatus(selectedUser) : "Unknown"}. Deactivation disables access
+                and permanently revokes the current certificate. Reactivation issues a new certificate.
               </Alert>
+              {selectedIsPendingActivation && (
+                <Alert type="info">
+                  This account is waiting for its one-time activation token to be used. It does not have a login password
+                  or certificate yet.
+                </Alert>
+              )}
               {canDeactivateSelected && (
                 <Button variant="danger" onClick={deactivateUser}>Deactivate Account</Button>
               )}

@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from server.api.deps import get_current_user, require_admin, require_super_admin
 from server.db.mongo import get_db
 from server.services.validation import validate_username, validate_password, validate_name, validate_department, validate_phone, DEPARTMENTS, STATUSES, validate_status
-from server.services.auth_service import hash_password
+from server.services.auth_service import issue_activation_token
 from server.services.crypto_pki import is_revoked, issue_user_certificate, revoke_serial
 from server.services.crypto_encrypt import encrypt_fields, decrypt_fields
 from server.services.audit_service import log_event
@@ -77,12 +77,15 @@ def list_users(user=Depends(get_current_user)):
     users = []
     for u in db.users.find({}, {"password_hash": 0, "public_key_pem": 0}):
         u["_id"] = str(u["_id"])
+        activation = u.pop("activation", None) or {}
+        u["activation_pending"] = bool(activation.get("token_hash")) and not u.get("active", True)
+        if activation.get("expires_at"):
+            u["activation_expires_at"] = activation["expires_at"]
         users.append(u)
     return {"users": users}
 
 class AdminCreateUser(BaseModel):
     username: str
-    password: str
     first_name: str
     last_name: str
     department: str
@@ -100,7 +103,6 @@ def admin_create_user(body: AdminCreateUser, user=Depends(get_current_user)):
     db = get_db()
     try:
         validate_username(body.username)
-        validate_password(body.password)
         validate_name(body.first_name, "First name")
         validate_name(body.last_name, "Last name")
         validate_department(body.department)
@@ -110,38 +112,46 @@ def admin_create_user(body: AdminCreateUser, user=Depends(get_current_user)):
 
     if db.users.find_one({"username": body.username}):
         raise HTTPException(status_code=400, detail="User already exists.")
-    cert_info = issue_user_certificate(body.username, body.password, actor_admin=user["sub"])
+    activation_token, activation = issue_activation_token()
     db.users.insert_one({
         "username": body.username,
         "role": role,
         "department": body.department,
-        "password_hash": hash_password(body.password),
+        "password_hash": None,
         "created_at": _now(),
-        "cert_pem": cert_info["cert_pem"],
-        "cert_serial": str(cert_info["serial"]),
-        "public_key_pem": cert_info["public_key_pem"],
-        "pkcs12_path": cert_info["pkcs12_path"],
+        "cert_pem": None,
+        "cert_serial": None,
+        "public_key_pem": None,
+        "pkcs12_path": None,
         "failed_attempts": 0,
         "locked_until": None,
         "presence_state": "offline",
         "last_seen": _now(),
-        "active": True,
+        "active": False,
+        "activation": {**activation, "issued_by": user["sub"]},
     })
     profile_doc = encrypt_fields({
         "username": body.username,
         "first_name": body.first_name,
         "last_name": body.last_name,
+        "job_role": "",
         "department": body.department,
         "phone": body.phone or "",
         "address": "",
         "updated_at": _now(),
     }, fields=["phone","address"])
     db.profiles.insert_one(profile_doc)
-    log_event("USER_CREATED", user["sub"], body.username, "User created via admin", {"role": role})
+    log_event(
+        "USER_CREATED_PENDING",
+        user["sub"],
+        body.username,
+        "User created in pending activation state",
+        {"role": role, "activation_expires_at": activation["expires_at"].isoformat()},
+    )
     return {
         "ok": True,
-        "keystore_b64": base64.b64encode(Path(cert_info["pkcs12_path"]).read_bytes()).decode("ascii"),
-        "keystore_filename": f"{body.username}-keystore.p12",
+        "activation_token": activation_token,
+        "activation_expires_at": activation["expires_at"].isoformat(),
     }
 
 class UpdateUser(BaseModel):
