@@ -67,6 +67,8 @@ def request_otp(body: OTPRequest):
         msg = str(e)
         if msg == "Invalid credentials":
             raise HTTPException(status_code=401, detail=msg)
+        if msg == "This account is inactive.":
+            raise HTTPException(status_code=403, detail=msg)
         if msg.startswith("Account is locked"):
             raise HTTPException(status_code=423, detail=msg)
         if msg == "This account is not authorized for the selected portal.":
@@ -83,6 +85,8 @@ def verify(body: OTPVerify):
         msg = str(e)
         if msg.startswith("OTP invalid"):
             raise HTTPException(status_code=401, detail=msg)
+        if msg == "This account is inactive.":
+            raise HTTPException(status_code=403, detail=msg)
         if msg.startswith("Certificate revoked"):
             raise HTTPException(status_code=403, detail=msg)
         if msg.startswith("Account is locked"):

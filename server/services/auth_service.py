@@ -48,6 +48,11 @@ def get_user(username: str) -> Optional[dict]:
     db = get_db()
     return db.users.find_one({"username": username})
 
+
+def ensure_active_user(user: dict) -> None:
+    if not user.get("active", True):
+        raise ValueError("This account is inactive.")
+
 def set_lock(username: str, seconds: int):
     db = get_db()
     db.users.update_one({"username": username}, {"$set": {"locked_until": _now() + timedelta(seconds=seconds)}})
@@ -81,6 +86,7 @@ def request_otp_challenge(username: str, password: str, portal: str) -> dict:
     user = get_user(username)
     if not user:
         raise ValueError("Invalid credentials")
+    ensure_active_user(user)
     if is_locked(user):
         raise ValueError("Account is locked. Try again in 2 minutes.")
     if not verify_password(password, user.get("password_hash","")):
@@ -111,6 +117,7 @@ def verify_login(otp_token: str, otp_code: str, signature_b64: str) -> dict:
     user = get_user(username)
     if not user:
         raise ValueError("Invalid login.")
+    ensure_active_user(user)
     if is_locked(user):
         raise ValueError("Account is locked. Try again in 2 minutes.")
     cert_pem = user.get("cert_pem")

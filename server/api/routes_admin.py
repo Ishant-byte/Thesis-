@@ -14,7 +14,7 @@ from server.api.deps import get_current_user, require_admin, require_super_admin
 from server.db.mongo import get_db
 from server.services.validation import validate_username, validate_password, validate_name, validate_department, validate_phone, DEPARTMENTS, STATUSES, validate_status
 from server.services.auth_service import hash_password
-from server.services.crypto_pki import issue_user_certificate, revoke_serial
+from server.services.crypto_pki import is_revoked, issue_user_certificate, revoke_serial
 from server.services.crypto_encrypt import encrypt_fields, decrypt_fields
 from server.services.audit_service import log_event
 
@@ -33,6 +33,41 @@ def _require_can_manage_account(actor: dict, target: dict) -> None:
         raise HTTPException(status_code=403, detail="Super admin accounts cannot be managed here.")
     if target_role == "admin" and actor.get("role") != "super_admin":
         raise HTTPException(status_code=403, detail="Only a super admin can manage administrators.")
+
+
+def _deactivate_account(actor: dict, target: dict, reason: str) -> None:
+    username = target.get("username")
+    if username == actor.get("sub"):
+        raise HTTPException(status_code=400, detail="You cannot deactivate your own account.")
+    _require_can_manage_account(actor, target)
+    if not target.get("active", True):
+        raise HTTPException(status_code=400, detail="User is already inactive.")
+    serial = target.get("cert_serial")
+    if not serial:
+        raise HTTPException(status_code=400, detail="User has no certificate.")
+    db = get_db()
+    previous_presence = target.get("presence_state")
+    db.users.update_one(
+        {"username": username},
+        {"$set": {"active": False, "presence_state": "offline"}},
+    )
+    try:
+        revoke_serial(str(serial), actor_admin=actor["sub"], target_username=username, reason=reason)
+    except Exception:
+        db.users.update_one(
+            {"username": username},
+            {"$set": {"active": True, "presence_state": previous_presence}},
+        )
+        logger.exception("Failed to revoke current certificate during deactivation for username=%s", username)
+        raise HTTPException(status_code=503, detail="Certificate revocation failed; account was not deactivated.")
+    log_event(
+        "USER_DEACTIVATED",
+        actor["sub"],
+        username,
+        "User account deactivated",
+        {"serial": str(serial), "reason": reason},
+        severity="WARN",
+    )
 
 
 @router.get("/users")
@@ -126,9 +161,9 @@ def update_user(username: str, body: UpdateUser, user=Depends(get_current_user))
     if not target:
         raise HTTPException(status_code=404, detail="User not found.")
     _require_can_manage_account(user, target)
-    upd_user = {}
     if body.active is not None:
-        upd_user["active"] = bool(body.active)
+        raise HTTPException(status_code=400, detail="Use the dedicated deactivate action for account status changes.")
+    upd_user = {}
     if body.presence_state is not None:
         try:
             validate_status(body.presence_state)
@@ -174,20 +209,80 @@ def update_user(username: str, body: UpdateUser, user=Depends(get_current_user))
 @router.delete("/users/{username}")
 def delete_user(username: str, user=Depends(get_current_user)):
     require_admin(user)
-    db = get_db()
-    if username == user["sub"]:
-        raise HTTPException(status_code=400, detail="You cannot delete yourself.")
-    target = db.users.find_one({"username": username})
-    if not target:
-        raise HTTPException(status_code=404, detail="User not found.")
-    _require_can_manage_account(user, target)
-    res = db.users.delete_one({"username": username})
-    db.profiles.delete_one({"username": username})
-    log_event("USER_DELETED", user["sub"], username, "User deleted", {})
-    return {"ok": res.deleted_count == 1}
+    raise HTTPException(status_code=400, detail="User deletion is disabled. Deactivate the account instead.")
 
 class RevokeBody(BaseModel):
     reason: str = "unspecified"
+
+
+class DeactivateBody(BaseModel):
+    reason: str = "offboarding"
+
+
+class ReactivateBody(BaseModel):
+    new_password: str
+
+
+@router.post("/users/{username}/deactivate")
+def deactivate_user(username: str, body: DeactivateBody, user=Depends(get_current_user)):
+    require_admin(user)
+    db = get_db()
+    target = db.users.find_one({"username": username})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+    _deactivate_account(user, target, body.reason)
+    return {"ok": True}
+
+
+@router.post("/users/{username}/reactivate")
+def reactivate_user(username: str, body: ReactivateBody, user=Depends(get_current_user)):
+    require_admin(user)
+    db = get_db()
+    target = db.users.find_one({"username": username})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if username == user["sub"]:
+        raise HTTPException(status_code=400, detail="You cannot reactivate your own account.")
+    _require_can_manage_account(user, target)
+    if target.get("active", True):
+        raise HTTPException(status_code=400, detail="User is already active.")
+    old_serial = target.get("cert_serial")
+    if not old_serial:
+        raise HTTPException(status_code=400, detail="User has no previous certificate enrollment.")
+    try:
+        validate_password(body.new_password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if not is_revoked(str(old_serial)):
+        revoke_serial(str(old_serial), actor_admin=user["sub"], target_username=username, reason="reactivation-old-certificate")
+
+    try:
+        cert_info = issue_user_certificate(username, body.new_password, actor_admin=user["sub"])
+    except Exception:
+        logger.exception("Failed to issue replacement certificate during reactivation for username=%s", username)
+        raise HTTPException(status_code=503, detail="Replacement credential issuance failed; account remains inactive.")
+    db.users.update_one({"username": username}, {"$set": {
+        "active": True,
+        "presence_state": "offline",
+        "cert_pem": cert_info["cert_pem"],
+        "cert_serial": str(cert_info["serial"]),
+        "public_key_pem": cert_info["public_key_pem"],
+        "pkcs12_path": cert_info["pkcs12_path"],
+    }})
+    log_event(
+        "USER_REACTIVATED",
+        user["sub"],
+        username,
+        "User account reactivated with a new certificate",
+        {"previous_serial": str(old_serial), "new_serial": str(cert_info["serial"])},
+    )
+    return {
+        "ok": True,
+        "keystore_b64": base64.b64encode(Path(cert_info["pkcs12_path"]).read_bytes()).decode("ascii"),
+        "keystore_filename": f"{username}-keystore.p12",
+    }
+
 
 @router.post("/users/{username}/revoke-cert")
 def revoke_cert(username: str, body: RevokeBody, user=Depends(get_current_user)):

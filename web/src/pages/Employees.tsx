@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAuth } from "../lib/auth";
-import { get, post, del, downloadBase64File } from "../lib/api";
+import { get, post, downloadBase64File } from "../lib/api";
 import { DEPARTMENTS } from "../lib/constants";
 import { PageHeader, Alert, Table, Card, Select } from "../components/ui";
 import { Button } from "../components/Button";
@@ -9,6 +9,7 @@ import { Input } from "../components/Input";
 interface User {
   username: string;
   role: string;
+  active: boolean;
   presence_state: string;
   department?: string;
   cert_serial?: string;
@@ -43,22 +44,39 @@ export function EmployeesPage() {
   const [rotatePassword, setRotatePassword] = useState("");
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const actionsRef = useRef<HTMLDivElement>(null);
   const selectedUser = users.find((user) => user.username === selected);
   const canManageSelected = selectedUser?.role === "employee" || (isSuperAdmin && selectedUser?.role === "admin");
+  const canDeactivateSelected = Boolean(
+    selectedUser && canManageSelected && selectedUser.active && selectedUser.username !== session?.username
+  );
+  const canReactivateSelected = Boolean(
+    selectedUser && canManageSelected && !selectedUser.active && selectedUser.username !== session?.username
+  );
 
-  const refresh = async () => {
+  const refresh = async (announce = false) => {
     if (!session) return;
+    setRefreshing(true);
+    setError("");
     try {
       const data = await get<{ users: User[] }>("/admin/users", session.token);
       setUsers(data.users ?? []);
+      if (announce) setMsg("Employee list refreshed.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
+    } finally {
+      setRefreshing(false);
     }
   };
 
   useEffect(() => {
     refresh();
   }, [session]);
+
+  useEffect(() => {
+    if (selected) actionsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [selected]);
 
   const createUser = async () => {
     if (!session) return;
@@ -77,16 +95,41 @@ export function EmployeesPage() {
     }
   };
 
-  const deleteUser = async () => {
-    if (!session || !selected) return;
-    if (!confirm(`Delete ${selected}?`)) return;
+  const deactivateUser = async () => {
+    if (!session || !selectedUser || !canDeactivateSelected) return;
+    if (
+      !confirm(
+        `Deactivate ${selectedUser.username}? This will disable account access immediately and revoke the current certificate.`
+      )
+    ) return;
     try {
-      await del(`/admin/users/${selected}`, session.token);
-      setMsg("User deleted.");
-      setSelected("");
+      await post(`/admin/users/${selectedUser.username}/deactivate`, { reason: "offboarding" }, session.token);
+      setMsg("Account deactivated and current certificate revoked.");
       refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Delete failed");
+      setError(e instanceof Error ? e.message : "Deactivate failed");
+    }
+  };
+
+  const reactivateUser = async () => {
+    if (!session || !selectedUser || !canReactivateSelected || !rotatePassword) return;
+    if (
+      !confirm(
+        `Reactivate ${selectedUser.username}? A new certificate and keystore will be issued. The previous certificate will remain permanently revoked.`
+      )
+    ) return;
+    try {
+      const resp = await post<{ keystore_b64: string; keystore_filename: string }>(
+        `/admin/users/${selectedUser.username}/reactivate`,
+        { new_password: rotatePassword },
+        session.token
+      );
+      downloadBase64File(resp.keystore_b64, resp.keystore_filename);
+      setMsg("Account reactivated. The new keystore has been downloaded; transfer it securely.");
+      setRotatePassword("");
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Reactivate failed");
     }
   };
 
@@ -124,7 +167,9 @@ export function EmployeesPage() {
 
       <Card className="mb-6">
         <div className="flex flex-wrap gap-3">
-          <Button variant="secondary" onClick={refresh}>Refresh</Button>
+          <Button variant="secondary" onClick={() => refresh(true)} disabled={refreshing}>
+            {refreshing ? "Refreshing..." : "Refresh"}
+          </Button>
           <Button onClick={() => setShowCreate(!showCreate)}>{showCreate ? "Cancel" : "Create User"}</Button>
         </div>
       </Card>
@@ -149,32 +194,47 @@ export function EmployeesPage() {
       )}
 
       <Table
-        headers={["Role", "Status", "Department", "Username"]}
+        headers={["Role", "Account", "Presence", "Department", "Username", "Actions"]}
         rows={users.map((u) => [
           u.role,
+          u.active ? "Active" : "Inactive",
           u.presence_state ?? "offline",
-          u.department ?? "—",
-          <button key={u.username} className="text-brand-700 hover:underline" onClick={() => setSelected(u.username)}>
-            {u.username}
-          </button>,
+          u.department ?? "-",
+          u.username,
+          <Button key={u.username} variant="secondary" onClick={() => setSelected(u.username)}>Manage</Button>,
         ])}
       />
 
       {selected && (
+        <div ref={actionsRef}>
         <Card className="mt-6">
           <h3 className="mb-4 font-medium text-slate-900">Actions for {selected}</h3>
           {canManageSelected ? (
-            <div className="flex flex-wrap items-end gap-4">
-              <Input label="Revoke Reason" value={revokeReason} onChange={(e) => setRevokeReason(e.target.value)} className="max-w-xs" />
-              <Button variant="secondary" onClick={revokeCert}>Revoke Certificate</Button>
-              <Input label="New Keystore Password" type="password" value={rotatePassword} onChange={(e) => setRotatePassword(e.target.value)} className="max-w-xs" />
-              <Button variant="secondary" onClick={rotateCert}>Rotate Certificate</Button>
-              <Button variant="danger" onClick={deleteUser}>Delete User</Button>
+            <div className="space-y-4">
+              <Alert type="info">
+                Account status: {selectedUser?.active ? "Active" : "Inactive"}. Deactivation disables access and permanently revokes the current certificate. Reactivation issues a new certificate; it never restores the old one.
+              </Alert>
+              {canDeactivateSelected && (
+                <Button variant="danger" onClick={deactivateUser}>Deactivate Account</Button>
+              )}
+              {canReactivateSelected && (
+                <div className="flex flex-wrap items-end gap-4">
+                  <Input label="New Keystore Password" type="password" value={rotatePassword} onChange={(e) => setRotatePassword(e.target.value)} className="max-w-xs" />
+                  <Button onClick={reactivateUser} disabled={!rotatePassword}>Reactivate & Issue New Certificate</Button>
+                </div>
+              )}
+              {selectedUser?.active && <div className="flex flex-wrap items-end gap-4">
+                <Input label="Revoke Reason" value={revokeReason} onChange={(e) => setRevokeReason(e.target.value)} className="max-w-xs" />
+                <Button variant="secondary" onClick={revokeCert}>Revoke Certificate</Button>
+                <Input label="New Keystore Password" type="password" value={rotatePassword} onChange={(e) => setRotatePassword(e.target.value)} className="max-w-xs" />
+                <Button variant="secondary" onClick={rotateCert}>Rotate Certificate</Button>
+              </div>}
             </div>
           ) : (
             <Alert type="info">This privileged account can only be managed through the super-admin policy.</Alert>
           )}
         </Card>
+        </div>
       )}
     </div>
   );
