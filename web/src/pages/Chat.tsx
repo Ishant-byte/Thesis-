@@ -1,16 +1,25 @@
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "../lib/auth";
 import { getWS, type Person } from "../components/DashboardLayout";
+import { get } from "../lib/api";
 import {
   ChatKeys,
   newEphemeral,
   deriveSessionKey,
   encryptChat,
   decryptChat,
-  signBytesP12,
+  certToPem,
+  getCaCertFromP12,
 } from "../lib/crypto";
+import {
+  buildSessionContext,
+  createSignedChatHandshake,
+  type SignedChatHandshake,
+  verifyChatHandshake,
+} from "../lib/chatHandshake";
 import type { WSMessage } from "../lib/ws";
-import { PageHeader, Alert, Card, Select } from "../components/ui";
+import { loadChatHistory, saveChatHistory, type ChatHistoryRecord } from "../lib/chatHistory";
+import { PageHeader, Alert, Card } from "../components/ui";
 import { Button } from "../components/Button";
 
 interface ChatLine {
@@ -24,14 +33,18 @@ export function ChatPage() {
   const [people, setPeople] = useState<Person[]>([]);
   const [peer, setPeer] = useState("");
   const [message, setMessage] = useState("");
-  const [expiry, setExpiry] = useState("Off");
   const [lines, setLines] = useState<ChatLine[]>([]);
+  const [history, setHistory] = useState<ChatHistoryRecord[]>([]);
+  const historyRef = useRef<ChatHistoryRecord[]>([]);
   const [error, setError] = useState("");
   const sessions = useRef<Map<string, ChatKeys>>(new Map());
   const pending = useRef<Map<string, ChatKeys>>(new Map());
   const queuedMessages = useRef<Map<string, string[]>>(new Map());
+  const seenHandshakeReplays = useRef<Set<string>>(new Set());
+  const trustCache = useRef<{ caCertPem: string; revokedSerials: Set<string> } | null>(null);
   const lineId = useRef(0);
   const chatEnd = useRef<HTMLDivElement>(null);
+  const conversationUsers = Array.from(new Set([...history.map((item) => item.peer), ...people.map((person) => person.username)]));
 
   const append = (text: string, type: ChatLine["type"] = "system") => {
     lineId.current += 1;
@@ -45,11 +58,42 @@ export function ChatPage() {
     return null;
   };
 
-  const expirySeconds = () => {
-    if (expiry === "30s") return 30;
-    if (expiry === "5m") return 300;
-    if (expiry === "1h") return 3600;
-    return 0;
+  const recordHistory = async (targetPeer: string, text: string, direction: ChatHistoryRecord["direction"]) => {
+    if (!session?.keystore) return;
+    const next = [
+      ...historyRef.current,
+      { id: crypto.randomUUID(), peer: targetPeer, direction, text, createdAt: new Date().toISOString() },
+    ].slice(-500);
+    historyRef.current = next;
+    setHistory(next);
+    await saveChatHistory(session.keystore, session.username, next);
+  };
+
+  const clearUnverifiedSessions = () => {
+    pending.current.clear();
+    queuedMessages.current.clear();
+    for (const [username, keys] of sessions.current) {
+      if (!keys.sessionKey) sessions.current.delete(username);
+    }
+  };
+
+  const secureFailure = () => {
+    clearUnverifiedSessions();
+    append("Secure connection could not be verified.", "system");
+  };
+
+  const secureEstablished = (targetPeer: string) => {
+    append(`Secure conversation established with ${targetPeer}.`, "system");
+  };
+
+  const loadTrust = async (keystore: { bytes: ArrayBuffer; password: string }) => {
+    const caCertPem = trustCache.current?.caCertPem
+      ?? certToPem(getCaCertFromP12(keystore.bytes, keystore.password));
+    const revokedSerials = new Set(
+      (await get<{ revoked_serials: string[] }>("/pki/crl.json")).revoked_serials
+    );
+    trustCache.current = { caCertPem, revokedSerials };
+    return trustCache.current;
   };
 
   const sendEncrypted = async (targetPeer: string, text: string, ck: ChatKeys) => {
@@ -60,9 +104,9 @@ export function ChatPage() {
       type: "chat_msg",
       peer: targetPeer,
       session_id: ck.offerId,
-      payload: { nonce_b64: nonceB64, ct_b64: ctB64, counter: ck.sendCounter, expire_seconds: expirySeconds() },
+      payload: { nonce_b64: nonceB64, ct_b64: ctB64, counter: ck.sendCounter },
     });
-    append(`You -> ${targetPeer}: ${text}`, "sent");
+    await recordHistory(targetPeer, text, "sent");
   };
 
   const flushQueued = async (targetPeer: string, ck: ChatKeys) => {
@@ -82,14 +126,32 @@ export function ChatPage() {
   }, [session]);
 
   useEffect(() => {
-    if (people.length === 0) {
+    let cancelled = false;
+    if (!session?.keystore) {
+      historyRef.current = [];
+      setHistory([]);
+      return;
+    }
+    loadChatHistory(session.keystore, session.username).then((records) => {
+      if (!cancelled) {
+        historyRef.current = records;
+        setHistory(records);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [session]);
+
+  useEffect(() => {
+    if (conversationUsers.length === 0) {
       setPeer("");
       return;
     }
-    if (!peer || !people.some((p) => p.username === peer)) {
-      setPeer(people[0].username);
+    if (!peer || !conversationUsers.includes(peer)) {
+      setPeer(conversationUsers[0]);
     }
-  }, [people, peer]);
+  }, [people, history, peer]);
 
   useEffect(() => {
     chatEnd.current?.scrollIntoView({ behavior: "smooth" });
@@ -99,41 +161,96 @@ export function ChatPage() {
     const handler = async (msg: WSMessage) => {
       const t = msg.type as string;
       if (t === "chat_offer") {
-        const sender = msg.from as string;
-        const offerId = msg.offer_id as string;
-        const ephPubB64 = msg.eph_pub_b64 as string;
-        if (!sender || !offerId || !ephPubB64 || !session) return;
+        const envelope = msg as unknown as SignedChatHandshake;
+        const sender = envelope.from;
+        const offerId = envelope.offer_id;
+        if (!sender || !offerId || !session) return;
         const ks = getKeystore();
         if (!ks) {
           append("[!] Keystore not loaded - sign in again with your .p12 file.", "system");
           return;
         }
         try {
+          const trust = await loadTrust(ks);
+          const verified = verifyChatHandshake({
+            envelope,
+            expectedType: "chat_offer",
+            expectedFrom: sender,
+            expectedTo: session.username,
+            caCertPem: trust.caCertPem,
+            revokedSerials: trust.revokedSerials,
+            seenReplayKeys: seenHandshakeReplays.current,
+          });
+          if (!verified.ok) {
+            secureFailure();
+            return;
+          }
           const { privKey, pubB64 } = await newEphemeral();
           const ck: ChatKeys = { offerId, peer: sender, privKey, pubB64, sessionKey: null, sendCounter: 0, recvCounter: 0 };
-          ck.sessionKey = await deriveSessionKey(privKey, ephPubB64, offerId);
+          ck.sessionKey = await deriveSessionKey(
+            privKey,
+            envelope.eph_pub_b64,
+            buildSessionContext(offerId, sender, session.username, envelope.eph_pub_b64, pubB64)
+          );
           sessions.current.set(sender, ck);
-          const data = new TextEncoder().encode(`chat_answer|${sender}|${session.username}|${offerId}|${pubB64}`);
-          const sigB64 = await signBytesP12(ks.bytes, ks.password, data);
-          getWS().client?.send({ type: "chat_answer", offer_id: offerId, eph_pub_b64: pubB64, sig_b64: sigB64 });
-          append(`Secure session accepted: ${sender}`, "system");
-          await flushQueued(sender, ck);
-        } catch (e) {
-          append(`Failed to accept session: ${e instanceof Error ? e.message : "error"}`, "system");
-        }
-      } else if (t === "chat_answer") {
-        const sender = msg.from as string;
-        const offerId = msg.offer_id as string;
-        const ephPubB64 = msg.eph_pub_b64 as string;
-        const ck = pending.current.get(offerId);
-        if (!sender || !ck || !ephPubB64) return;
-        try {
-          ck.sessionKey = await deriveSessionKey(ck.privKey, ephPubB64, offerId);
-          pending.current.delete(offerId);
-          append(`Secure session established with ${sender}`, "system");
+          const answer = await createSignedChatHandshake(
+            "chat_answer",
+            session.username,
+            sender,
+            offerId,
+            crypto.randomUUID(),
+            pubB64,
+            ks.bytes,
+            ks.password
+          );
+          getWS().client?.send(answer as unknown as Record<string, unknown>);
+          secureEstablished(sender);
           await flushQueued(sender, ck);
         } catch {
-          /* ignore */
+          secureFailure();
+        }
+      } else if (t === "chat_answer") {
+        const envelope = msg as unknown as SignedChatHandshake;
+        const sender = envelope.from;
+        const offerId = envelope.offer_id;
+        const ck = pending.current.get(offerId);
+        if (!sender || !ck || !offerId || !session) return;
+        const ks = getKeystore();
+        if (!ks) {
+          pending.current.delete(offerId);
+          sessions.current.delete(ck.peer);
+          secureFailure();
+          return;
+        }
+        try {
+          const trust = await loadTrust(ks);
+          const verified = verifyChatHandshake({
+            envelope,
+            expectedType: "chat_answer",
+            expectedFrom: ck.peer,
+            expectedTo: session.username,
+            caCertPem: trust.caCertPem,
+            revokedSerials: trust.revokedSerials,
+            seenReplayKeys: seenHandshakeReplays.current,
+          });
+          if (!verified.ok) {
+            pending.current.delete(offerId);
+            sessions.current.delete(ck.peer);
+            secureFailure();
+            return;
+          }
+          ck.sessionKey = await deriveSessionKey(
+            ck.privKey,
+            envelope.eph_pub_b64,
+            buildSessionContext(offerId, session.username, sender, ck.pubB64, envelope.eph_pub_b64)
+          );
+          pending.current.delete(offerId);
+          secureEstablished(sender);
+          await flushQueued(sender, ck);
+        } catch {
+          pending.current.delete(offerId);
+          sessions.current.delete(ck.peer);
+          secureFailure();
         }
       } else if (t === "chat_msg") {
         const sender = msg.from as string;
@@ -145,12 +262,12 @@ export function ChatPage() {
         ck.recvCounter = payload.counter;
         try {
           const text = await decryptChat(ck.sessionKey, payload.nonce_b64, payload.ct_b64);
-          append(`${sender}: ${text}`, "received");
+          await recordHistory(sender, text, "received");
         } catch {
           /* ignore */
         }
       } else if (t === "error") {
-        append(`[server] ${msg.message}`, "system");
+        secureFailure();
       }
     };
 
@@ -158,25 +275,34 @@ export function ChatPage() {
     return () => {
       getWS().handlers = getWS().handlers.filter((h) => h !== handler);
     };
-  }, [expiry, session]);
+  }, [session]);
 
   const ensureSession = async (targetPeer: string): Promise<ChatKeys> => {
     const existing = sessions.current.get(targetPeer);
     if (existing) return existing;
+    if (!session) throw new Error("Not signed in.");
 
     const ks = getKeystore();
     if (!ks) throw new Error("Keystore not loaded. Sign in again with your .p12 file.");
 
-    const offerId = crypto.randomUUID().slice(0, 12);
+    const offerId = crypto.randomUUID();
     const { privKey, pubB64 } = await newEphemeral();
     const ck: ChatKeys = { offerId, peer: targetPeer, privKey, pubB64, sessionKey: null, sendCounter: 0, recvCounter: 0 };
     pending.current.set(offerId, ck);
     sessions.current.set(targetPeer, ck);
 
-    const data = new TextEncoder().encode(`chat_offer|${session!.username}|${targetPeer}|${offerId}|${pubB64}`);
-    const sigB64 = await signBytesP12(ks.bytes, ks.password, data);
-    getWS().client?.send({ type: "chat_offer", peer: targetPeer, offer_id: offerId, eph_pub_b64: pubB64, sig_b64: sigB64 });
-    append(`Starting secure session with ${targetPeer}...`, "system");
+    const offer = await createSignedChatHandshake(
+      "chat_offer",
+      session.username,
+      targetPeer,
+      offerId,
+      crypto.randomUUID(),
+      pubB64,
+      ks.bytes,
+      ks.password
+    );
+    getWS().client?.send(offer as unknown as Record<string, unknown>);
+    append(`Starting secure conversation with ${targetPeer}...`, "system");
     return ck;
   };
 
@@ -201,51 +327,79 @@ export function ChatPage() {
     }
   };
 
-  const peerOptions = people.map((p) => p.username);
-  const peerSelectOptions = peerOptions.length ? peerOptions : [{ value: "", label: "No peers online" }];
+  const peerHistory = history.filter((item) => item.peer === peer);
 
   return (
     <div className="flex h-[calc(100vh-4rem)] flex-col">
-      <PageHeader title="Secure Chat" description="End-to-end encrypted messaging with optional disappearing messages." />
+      <PageHeader title="Secure Chat" description="End-to-end encrypted messaging." />
       {error && <div className="mb-4"><Alert type="error">{error}</Alert></div>}
 
-      <Card className="flex flex-1 flex-col overflow-hidden">
-        <div className="mb-4 flex flex-wrap items-center gap-3 border-b border-slate-100 pb-4">
-          <Select
-            label=""
-            value={peer}
-            onChange={setPeer}
-            options={peerSelectOptions}
-          />
-          <Select label="" value={expiry} onChange={setExpiry} options={["Off", "30s", "5m", "1h"]} />
-        </div>
+      <Card className="flex flex-1 overflow-hidden p-0">
+        <aside className="w-64 shrink-0 overflow-y-auto border-r border-slate-200 p-3">
+          <div className="mb-2 px-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Chats</div>
+          {conversationUsers.length === 0 && <p className="px-2 text-sm text-slate-400">No conversations yet.</p>}
+          {conversationUsers.map((username) => {
+            const person = people.find((item) => item.username === username);
+            return (
+              <button
+                key={username}
+                onClick={() => setPeer(username)}
+                className={`mb-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm ${
+                  peer === username ? "bg-brand-50 text-brand-800" : "text-slate-600 hover:bg-slate-50"
+                }`}
+              >
+                <span className={`h-2 w-2 shrink-0 rounded-full ${person?.presence_state === "online" ? "bg-emerald-500" : "bg-slate-300"}`} />
+                <span className="truncate">{username}</span>
+              </button>
+            );
+          })}
+        </aside>
 
-        <div className="flex-1 overflow-y-auto rounded-lg bg-slate-50 p-4">
-          {lines.length === 0 && (
-            <p className="text-center text-sm text-slate-400">Select a colleague and send a message to start.</p>
-          )}
-          {lines.map((l) => (
-            <div
-              key={l.id}
-              className={`mb-2 text-sm ${
-                l.type === "sent" ? "text-brand-800" : l.type === "received" ? "text-slate-800" : "text-slate-400 italic"
-              }`}
-            >
-              {l.text}
-            </div>
-          ))}
-          <div ref={chatEnd} />
-        </div>
+        <div className="flex min-w-0 flex-1 flex-col p-6">
+          <div className="mb-4 flex items-center gap-3 border-b border-slate-100 pb-4">
+            <div className="min-w-0 flex-1 truncate font-medium text-slate-800">{peer || "Select a conversation"}</div>
+          </div>
 
-        <div className="mt-4 flex gap-3">
-          <input
-            className="input-field flex-1"
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && send()}
-            placeholder="Type a message..."
-          />
-          <Button onClick={send} disabled={!peer || !message.trim()}>Send</Button>
+          <div className="flex-1 overflow-y-auto rounded-lg bg-slate-50 p-4">
+            {peerHistory.length === 0 && lines.length === 0 && (
+              <p className="text-center text-sm text-slate-400">Select a colleague and send a message to start.</p>
+            )}
+            {peerHistory.map((item) => (
+              <div key={item.id} className={`mb-2 flex ${item.direction === "sent" ? "justify-end" : "justify-start"}`}>
+                <div className={`max-w-[75%] rounded-2xl px-4 py-2 text-sm ${
+                  item.direction === "sent" ? "bg-brand-700 text-white" : "border border-slate-200 bg-white text-slate-800"
+                }`}>
+                  {item.text}
+                </div>
+              </div>
+            ))}
+            {lines.map((l) => (
+              <div
+                key={l.id}
+                className={`mb-2 flex text-sm ${
+                  l.type === "sent" ? "justify-end" : l.type === "received" ? "justify-start" : "justify-center text-slate-400 italic"
+                }`}
+              >
+                {l.type === "system" ? l.text : (
+                  <div className={`max-w-[75%] rounded-2xl px-4 py-2 ${
+                    l.type === "sent" ? "bg-brand-700 text-white" : "border border-slate-200 bg-white text-slate-800"
+                  }`}>{l.text}</div>
+                )}
+              </div>
+            ))}
+            <div ref={chatEnd} />
+          </div>
+
+          <div className="mt-4 flex gap-3">
+            <input
+              className="input-field flex-1"
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && send()}
+              placeholder="Type a message..."
+            />
+            <Button onClick={send} disabled={!peer || !message.trim()}>Send</Button>
+          </div>
         </div>
       </Card>
     </div>

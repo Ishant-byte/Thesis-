@@ -1,4 +1,4 @@
-import { Outlet, NavLink, useNavigate } from "react-router-dom";
+import { Outlet, NavLink, useLocation, useNavigate } from "react-router-dom";
 import {
   Users,
   Calendar,
@@ -58,6 +58,7 @@ export function getWS() {
 export function DashboardLayout() {
   const { session, logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const [people, setPeople] = useState<Person[]>([]);
   const [status, setStatus] = useState("online");
 
@@ -155,7 +156,7 @@ export function DashboardLayout() {
         </nav>
 
         {/* Presence panel */}
-        <div className="border-t border-slate-200 p-4">
+        {location.pathname !== "/dashboard/chat" && <div className="border-t border-slate-200 p-4">
           <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Team Presence</div>
           <select
             className="input-field mb-3 text-xs"
@@ -179,7 +180,7 @@ export function DashboardLayout() {
                 </div>
               ))}
           </div>
-        </div>
+        </div>}
 
         <div className="border-t border-slate-200 p-4">
           <div className="mb-2 truncate text-xs text-slate-500">{session.username}</div>

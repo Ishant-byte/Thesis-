@@ -7,6 +7,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+from cryptography.x509.oid import NameOID
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -17,7 +21,7 @@ from server.config.settings import SERVER_HOST, SERVER_PORT
 from server.api.deps import get_current_user
 from server.db.mongo import get_db
 from server.db.indexes import ensure_indexes
-from server.services.crypto_pki import ensure_ca, issue_user_certificate, is_revoked, verify_data_signature
+from server.services.crypto_pki import ensure_ca, issue_user_certificate, is_revoked, load_ca, verify_data_signature
 from server.services.crypto_encrypt import ensure_kek
 from server.services.auth_service import hash_password
 from server.services.audit_service import log_event
@@ -29,6 +33,48 @@ from server.api.routes_pki import router as pki_router
 
 def _now():
     return datetime.now(timezone.utc)
+
+
+def _chat_handshake_bytes(kind: str, sender: str, recipient: str, offer_id: str, nonce: str, eph_pub_b64: str) -> bytes:
+    return f"{kind}|{sender}|{recipient}|{offer_id}|{nonce}|{eph_pub_b64}".encode("utf-8")
+
+
+def _validate_chat_certificate(username: str, cert_pem: str, enrolled_cert_pem: str, serial: str | None) -> bool:
+    if not cert_pem or not enrolled_cert_pem:
+        return False
+    try:
+        cert = x509.load_pem_x509_certificate(cert_pem.encode("utf-8"))
+        enrolled_cert = x509.load_pem_x509_certificate(enrolled_cert_pem.encode("utf-8"))
+        if cert.public_bytes(serialization.Encoding.DER) != enrolled_cert.public_bytes(serialization.Encoding.DER):
+            return False
+        _ca_key, ca_cert = load_ca()
+        if cert.subject != cert.issuer and cert.issuer != ca_cert.subject:
+            return False
+        ca_cert.public_key().verify(
+            cert.signature,
+            cert.tbs_certificate_bytes,
+            asym_padding.PKCS1v15(),
+            cert.signature_hash_algorithm,
+        )
+        cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value.strip()
+        if cn != username:
+            return False
+        now = _now()
+        not_before = getattr(cert, "not_valid_before_utc", cert.not_valid_before.replace(tzinfo=timezone.utc))
+        not_after = getattr(cert, "not_valid_after_utc", cert.not_valid_after.replace(tzinfo=timezone.utc))
+        if now < not_before or now > not_after:
+            return False
+        basic_constraints = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
+        if basic_constraints.ca:
+            return False
+        key_usage = cert.extensions.get_extension_for_class(x509.KeyUsage).value
+        if not key_usage.digital_signature:
+            return False
+        if serial and is_revoked(str(serial)):
+            return False
+        return True
+    except Exception:
+        return False
 
 def seed_admin():
     db = get_db()
@@ -119,6 +165,28 @@ class WSManager:
     def __init__(self):
         self.connections: Dict[str, WebSocket] = {}  # username -> ws
         self.sessions: Dict[str, dict] = {}  # offer_id -> session temp
+        self.handshake_replays: Dict[str, datetime] = {}
+
+    def _prune_handshake_state(self):
+        cutoff = _now() - timedelta(minutes=10)
+        stale_keys = [key for key, created_at in self.handshake_replays.items() if created_at < cutoff]
+        for key in stale_keys:
+            self.handshake_replays.pop(key, None)
+        stale_offers = []
+        for offer_id, session in self.sessions.items():
+            created_at = session.get("created_at")
+            if isinstance(created_at, datetime) and created_at < cutoff:
+                stale_offers.append(offer_id)
+        for offer_id in stale_offers:
+            self.sessions.pop(offer_id, None)
+
+    def remember_handshake(self, kind: str, sender: str, recipient: str, offer_id: str, nonce: str) -> bool:
+        self._prune_handshake_state()
+        key = f"{kind}|{sender}|{recipient}|{offer_id}|{nonce}"
+        if key in self.handshake_replays:
+            return False
+        self.handshake_replays[key] = _now()
+        return True
 
     async def connect(self, username: str, ws: WebSocket):
         await ws.accept()
@@ -221,11 +289,13 @@ async def websocket_endpoint(ws: WebSocket):
 
             elif mtype == "chat_offer":
                 # Sender offers ephemeral pubkey to peer
-                peer = msg.get("peer")
+                peer = msg.get("to")
                 offer_id = msg.get("offer_id")
+                nonce = msg.get("nonce")
                 eph_pub_b64 = msg.get("eph_pub_b64")
+                cert_pem = msg.get("cert_pem")
                 sig_b64 = msg.get("sig_b64")
-                if not peer or not offer_id or not eph_pub_b64 or not sig_b64:
+                if not peer or not offer_id or not nonce or not eph_pub_b64 or not cert_pem or not sig_b64:
                     await manager.send(username, {"type":"error","message":"Invalid chat_offer"})
                     continue
                 db = get_db()
@@ -233,27 +303,48 @@ async def websocket_endpoint(ws: WebSocket):
                 if not sender:
                     continue
                 serial = sender.get("cert_serial")
-                if serial and is_revoked(str(serial)):
+                if not _validate_chat_certificate(username, cert_pem, sender.get("cert_pem", ""), serial):
                     await manager.send(username, {"type":"error","message":"Your certificate is revoked."})
                     continue
-                data = f"chat_offer|{username}|{peer}|{offer_id}|{eph_pub_b64}".encode("utf-8")
-                if not verify_data_signature(data, sig_b64, sender["cert_pem"]):
+                if not manager.remember_handshake("chat_offer", username, peer, offer_id, nonce):
+                    await manager.send(username, {"type":"error","message":"Replay detected on chat_offer"})
+                    continue
+                data = _chat_handshake_bytes("chat_offer", username, peer, offer_id, nonce, eph_pub_b64)
+                if not verify_data_signature(data, sig_b64, cert_pem):
                     await manager.send(username, {"type":"error","message":"Invalid signature on chat_offer"})
                     continue
                 # store offer
-                manager.sessions[offer_id] = {"a": username, "b": peer, "a_pub": eph_pub_b64, "created_at": _now().isoformat()}
+                manager.sessions[offer_id] = {
+                    "a": username,
+                    "b": peer,
+                    "a_pub": eph_pub_b64,
+                    "offer_nonce": nonce,
+                    "created_at": _now(),
+                }
                 # relay if peer online
-                await manager.send(peer, {"type":"chat_offer","from": username, "offer_id": offer_id, "eph_pub_b64": eph_pub_b64, "sig_b64": sig_b64})
+                await manager.send(peer, {
+                    "type":"chat_offer",
+                    "from": username,
+                    "to": peer,
+                    "offer_id": offer_id,
+                    "nonce": nonce,
+                    "eph_pub_b64": eph_pub_b64,
+                    "cert_pem": cert_pem,
+                    "sig_b64": sig_b64,
+                })
 
             elif mtype == "chat_answer":
                 offer_id = msg.get("offer_id")
+                peer = msg.get("to")
+                nonce = msg.get("nonce")
                 eph_pub_b64 = msg.get("eph_pub_b64")
+                cert_pem = msg.get("cert_pem")
                 sig_b64 = msg.get("sig_b64")
-                if not offer_id or not eph_pub_b64 or not sig_b64:
+                if not offer_id or not peer or not nonce or not eph_pub_b64 or not cert_pem or not sig_b64:
                     await manager.send(username, {"type":"error","message":"Invalid chat_answer"})
                     continue
                 sess = manager.sessions.get(offer_id)
-                if not sess or sess.get("b") != username:
+                if not sess or sess.get("b") != username or sess.get("a") != peer:
                     await manager.send(username, {"type":"error","message":"Unknown offer_id"})
                     continue
                 db = get_db()
@@ -261,30 +352,43 @@ async def websocket_endpoint(ws: WebSocket):
                 if not responder:
                     continue
                 serial = responder.get("cert_serial")
-                if serial and is_revoked(str(serial)):
+                if not _validate_chat_certificate(username, cert_pem, responder.get("cert_pem", ""), serial):
                     await manager.send(username, {"type":"error","message":"Your certificate is revoked."})
                     continue
-                data = f"chat_answer|{sess['a']}|{username}|{offer_id}|{eph_pub_b64}".encode("utf-8")
-                if not verify_data_signature(data, sig_b64, responder["cert_pem"]):
+                if not manager.remember_handshake("chat_answer", username, peer, offer_id, nonce):
+                    await manager.send(username, {"type":"error","message":"Replay detected on chat_answer"})
+                    continue
+                data = _chat_handshake_bytes("chat_answer", username, peer, offer_id, nonce, eph_pub_b64)
+                if not verify_data_signature(data, sig_b64, cert_pem):
                     await manager.send(username, {"type":"error","message":"Invalid signature on chat_answer"})
                     continue
                 # relay to initiator
-                await manager.send(sess["a"], {"type":"chat_answer","from": username, "offer_id": offer_id, "eph_pub_b64": eph_pub_b64, "sig_b64": sig_b64})
+                await manager.send(sess["a"], {
+                    "type":"chat_answer",
+                    "from": username,
+                    "to": peer,
+                    "offer_id": offer_id,
+                    "nonce": nonce,
+                    "eph_pub_b64": eph_pub_b64,
+                    "cert_pem": cert_pem,
+                    "sig_b64": sig_b64,
+                })
                 # optional: keep session in memory (client holds keys); we keep for a bit
+                sess["answer_nonce"] = nonce
                 sess["b_pub"] = eph_pub_b64
 
             elif mtype == "chat_msg":
                 # ciphertext relay + store
                 peer = msg.get("peer")
                 session_id = msg.get("session_id")
-                payload = msg.get("payload")  # {nonce_b64, ct_b64, counter, expire_seconds}
+                payload = msg.get("payload")  # {nonce_b64, ct_b64, counter}
                 if not peer or not session_id or not isinstance(payload, dict):
                     await manager.send(username, {"type":"error","message":"Invalid chat_msg"})
                     continue
-                expire_seconds = int(payload.get("expire_seconds", 0))
-                expireAt = None
-                if expire_seconds > 0:
-                    expireAt = _now() + timedelta(seconds=min(expire_seconds, 24*3600))
+                sess = manager.sessions.get(session_id)
+                if not sess or {username, peer} != {sess.get("a"), sess.get("b")} or not sess.get("b_pub"):
+                    await manager.send(username, {"type":"error","message":"Unknown chat session"})
+                    continue
                 db = get_db()
                 db.chat_messages.insert_one({
                     "session_id": session_id,
@@ -292,7 +396,6 @@ async def websocket_endpoint(ws: WebSocket):
                     "to": peer,
                     "payload": payload,
                     "created_at": _now(),
-                    "expireAt": expireAt,
                 })
                 await manager.send(peer, {"type":"chat_msg","from": username, "session_id": session_id, "payload": payload})
 

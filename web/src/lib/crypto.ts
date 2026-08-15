@@ -21,6 +21,11 @@ function bytesToBinaryString(bytes: ArrayBuffer | Uint8Array): string {
   return binary;
 }
 
+function maxPssSaltLengthBits(modulusBitLength: number): number {
+  const emLen = Math.ceil(modulusBitLength / 8);
+  return emLen - 32 - 2; // SHA-256 digest length = 32
+}
+
 export interface KeystoreHandle {
   p12Bytes: ArrayBuffer;
   password: string;
@@ -46,8 +51,7 @@ function getPrivateKey(p12Bytes: ArrayBuffer, password: string): forge.pki.rsa.P
 }
 
 function maxPssSaltLength(key: forge.pki.rsa.PrivateKey): number {
-  const emLen = Math.ceil(key.n.bitLength() / 8);
-  return emLen - 32 - 2; // SHA-256 digest length = 32
+  return maxPssSaltLengthBits(key.n.bitLength());
 }
 
 async function forgeKeyToCryptoKey(forgeKey: forge.pki.rsa.PrivateKey): Promise<CryptoKey> {
@@ -104,6 +108,20 @@ export function getCertFromP12(p12Bytes: ArrayBuffer, password: string): forge.p
   return cert;
 }
 
+export function getCaCertFromP12(p12Bytes: ArrayBuffer, password: string): forge.pki.Certificate {
+  const der = forge.util.createBuffer(bytesToBinaryString(p12Bytes));
+  const asn1 = forge.asn1.fromDer(der);
+  const p12 = forge.pkcs12.pkcs12FromAsn1(asn1, password);
+  const certBags = p12.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag] ?? [];
+  const caCert = certBags.find((bag) => {
+    const cert = bag.cert;
+    const basicConstraints = cert?.getExtension("basicConstraints") as { cA?: boolean } | undefined;
+    return Boolean(cert && basicConstraints?.cA);
+  })?.cert;
+  if (!caCert) throw new Error("No CA certificate in keystore.");
+  return caCert;
+}
+
 export function certToPem(cert: forge.pki.Certificate): string {
   return forge.pki.certificateToPem(cert);
 }
@@ -116,6 +134,27 @@ export function verifySignaturePem(certPem: string, digest: ArrayBuffer, signatu
     md.update(forge.util.createBuffer(new Uint8Array(digest)).getBytes(), "raw");
     // Forge verify with RSASSA-PSS (salt length auto-detected from signature)
     return pub.verify(md.digest().getBytes(), forge.util.decode64(signatureB64), "RSASSA-PSS");
+  } catch {
+    return false;
+  }
+}
+
+export function verifySignedBytesPem(
+  certPem: string,
+  data: Uint8Array | ArrayBuffer,
+  signatureB64: string
+): boolean {
+  try {
+    const cert = forge.pki.certificateFromPem(certPem);
+    const pub = cert.publicKey as forge.pki.rsa.PublicKey;
+    const md = forge.md.sha256.create();
+    md.update(bytesToBinaryString(data), "raw");
+    const pss = forge.pss.create({
+      md: forge.md.sha256.create(),
+      mgf: forge.mgf.mgf1.create(forge.md.sha256.create()),
+      saltLength: maxPssSaltLengthBits(pub.n.bitLength()),
+    });
+    return pub.verify(md.digest().getBytes(), forge.util.decode64(signatureB64), pss);
   } catch {
     return false;
   }
