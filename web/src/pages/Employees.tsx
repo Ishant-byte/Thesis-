@@ -45,6 +45,7 @@ export function EmployeesPage() {
     token: string;
     expiresAt: string;
   } | null>(null);
+  const [activationNotice, setActivationNotice] = useState("");
   const [revokeReason, setRevokeReason] = useState("compromised");
   const [rotatePassword, setRotatePassword] = useState("");
   const [msg, setMsg] = useState("");
@@ -99,6 +100,18 @@ export function EmployeesPage() {
     if (selected) actionsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [selected]);
 
+  useEffect(() => {
+    if (!activationResult) return;
+    const timer = window.setTimeout(() => setActivationResult(null), 60_000);
+    return () => window.clearTimeout(timer);
+  }, [activationResult]);
+
+  useEffect(() => {
+    if (!activationNotice) return;
+    const timer = window.setTimeout(() => setActivationNotice(""), 5_000);
+    return () => window.clearTimeout(timer);
+  }, [activationNotice]);
+
   const copyActivationValue = async (kind: "link" | "token", value: string) => {
     try {
       await navigator.clipboard.writeText(value);
@@ -126,7 +139,7 @@ export function EmployeesPage() {
         token: result.activation_token,
         expiresAt: result.activation_expires_at,
       });
-      setMsg("User created in pending activation. Share the one-time activation link securely.");
+      setActivationNotice(`${form.username.trim()} is pending activation.`);
       setShowCreate(false);
       setForm({
         username: "",
@@ -210,6 +223,11 @@ export function EmployeesPage() {
     <div>
       <PageHeader title="Employees & Admins" description="Manage user accounts and PKI certificates. Only a super admin can create administrators." />
       {error && <div className="mb-4"><Alert type="error">{error}</Alert></div>}
+      {activationNotice && (
+        <div className="fixed right-6 top-6 z-50 w-[min(24rem,calc(100vw-3rem))] shadow-lg">
+          <Alert type="success">{activationNotice}</Alert>
+        </div>
+      )}
       {msg && <div className="mb-4"><Alert type="success">{msg}</Alert></div>}
 
       <Card className="mb-6">
@@ -231,28 +249,17 @@ export function EmployeesPage() {
       {activationResult && (
         <Card className="mb-6 max-w-3xl">
           <div className="space-y-4">
-            <Alert type="success">
-              {activationResult.username} is pending activation until{" "}
-              {new Date(activationResult.expiresAt).toLocaleString()}.
-            </Alert>
             <p className="text-sm text-slate-600">
-              Share this one-time activation link or token securely. The user sets their own password during activation,
-              and their certificate is issued only after activation succeeds.
+              Share this one-time activation link securely.
             </p>
-            <Alert type="info">
+            <Alert type="error">
               This credential is single-use and expires at {new Date(activationResult.expiresAt).toLocaleString()}.
-              Do not send it in a public channel.
+              This link will be removed from this page after 60 seconds. Do not send it in a public channel.
             </Alert>
             <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
               <Input label="Activation Link" value={activationLink} readOnly className="sm:flex-1" />
               <Button variant="secondary" onClick={() => copyActivationValue("link", activationLink)}>
                 {copiedField === "link" ? "Copied" : "Copy Link"}
-              </Button>
-            </div>
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
-              <Input label="Activation Token" value={activationResult.token} readOnly className="sm:flex-1" />
-              <Button variant="secondary" onClick={() => copyActivationValue("token", activationResult.token)}>
-                {copiedField === "token" ? "Copied" : "Copy Token"}
               </Button>
             </div>
           </div>
